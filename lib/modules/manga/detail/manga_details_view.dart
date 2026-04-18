@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:isar_community/isar.dart';
+import 'package:mangayomi/eval/model/m_manga.dart';
 import 'package:mangayomi/main.dart';
 import 'package:mangayomi/models/category.dart';
 import 'package:mangayomi/models/chapter.dart';
@@ -18,12 +19,14 @@ import 'package:mangayomi/utils/extensions/chapter.dart';
 
 class MangaDetailsView extends ConsumerStatefulWidget {
   final Manga manga;
+  final List<MManga> seasons;
   final bool sourceExist;
   final Function(bool) checkForUpdate;
   const MangaDetailsView({
     super.key,
     required this.sourceExist,
     required this.manga,
+    required this.seasons,
     required this.checkForUpdate,
   });
 
@@ -250,6 +253,7 @@ class _MangaDetailsViewState extends ConsumerState<MangaDetailsView> {
                 ),
               ),
         manga: widget.manga,
+        seasons: widget.seasons,
         isExtended: (value) {
           ref.read(isExtendedStateProvider.notifier).update(value);
         },

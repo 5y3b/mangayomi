@@ -21,6 +21,8 @@ class MManga {
 
   List<MChapter>? chapters;
 
+  List<MManga>? seasons;
+
   MManga({
     this.author,
     this.artist,
@@ -31,6 +33,7 @@ class MManga {
     this.status = Status.unknown,
     this.description,
     this.chapters,
+    this.seasons,
   });
 
   factory MManga.fromJson(Map<String, dynamic> json) {
@@ -55,6 +58,9 @@ class MManga {
           : json['episodes'] != null
           ? (json['episodes'] as List).map((e) => MChapter.fromJson(e)).toList()
           : [],
+      seasons: (json['seasons'] as List?)
+          ?.map((e) => MManga.fromJson((e as Map).cast<String, dynamic>()))
+          .toList(),
     );
   }
   Map<String, dynamic> toJson() {
@@ -68,6 +74,7 @@ class MManga {
       'status': status.toString().substringAfter("."),
       'genre': genre,
       'chapters': chapters!.map((e) => e.toJson()).toList(),
+      if (seasons != null) 'seasons': seasons!.map((e) => e.toJson()).toList(),
     };
   }
 }

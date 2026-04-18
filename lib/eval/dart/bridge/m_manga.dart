@@ -17,6 +17,7 @@ class MMangaBridge {
           imageUrl: namedArgs.get<String?>('imageUrl'),
           link: namedArgs.get<String?>('link'),
           chapters: namedArgs.get<List?>('chapters')?.cast() ?? [],
+          seasons: namedArgs.get<List?>('seasons')?.cast(),
           name: namedArgs.get<String?>('name'),
         );
       },
@@ -31,6 +32,7 @@ class MMangaBridge {
       'imageUrl': (visitor, target) => (target as MManga).imageUrl,
       'link': (visitor, target) => (target as MManga).link,
       'chapters': (visitor, target) => (target as MManga).chapters,
+      'seasons': (visitor, target) => (target as MManga).seasons,
     },
     setters: {
       'name': (visitor, target, value) =>
@@ -51,6 +53,8 @@ class MMangaBridge {
           (target as MManga).link = value as String,
       'chapters': (visitor, target, value) =>
           (target as MManga).chapters = (value as List?)?.cast(),
+      'seasons': (visitor, target, value) =>
+          (target as MManga).seasons = (value as List?)?.cast(),
     },
   );
   void registerBridgedClasses(D4rt interpreter) {

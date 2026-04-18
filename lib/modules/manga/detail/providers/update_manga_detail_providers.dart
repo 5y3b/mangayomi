@@ -12,7 +12,7 @@ import 'package:riverpod_annotation/riverpod_annotation.dart';
 part 'update_manga_detail_providers.g.dart';
 
 @riverpod
-Future<dynamic> updateMangaDetail(
+Future<MManga?> updateMangaDetail(
   Ref ref, {
   required int? mangaId,
   required bool isInit,
@@ -20,9 +20,13 @@ Future<dynamic> updateMangaDetail(
 }) async {
   try {
     final manga = isar.mangas.getSync(mangaId!);
-    if ((manga!.isLocalArchive ?? false) ||
-        (manga.chapters.isNotEmpty && isInit)) {
-      return;
+    if (manga!.isLocalArchive ?? false) {
+      return null;
+    }
+    final shouldSkipDetail =
+        manga.itemType != ItemType.anime && manga.chapters.isNotEmpty && isInit;
+    if (shouldSkipDetail) {
+      return null;
     }
     final source = getSource(
       manga.lang!,
@@ -30,10 +34,13 @@ Future<dynamic> updateMangaDetail(
       manga.sourceId,
       installedOnly: true,
     );
+    if (source == null) {
+      return null;
+    }
     MManga getManga;
 
     getManga = await ref.read(
-      getDetailProvider(url: manga.link!, source: source!).future,
+      getDetailProvider(url: manga.link!, source: source).future,
     );
 
     final genre =
@@ -68,7 +75,7 @@ Future<dynamic> updateMangaDetail(
       ..updatedAt = DateTime.now().millisecondsSinceEpoch;
     final checkManga = isar.mangas.getSync(mangaId);
     if (checkManga!.chapters.isNotEmpty && isInit) {
-      return;
+      return getManga;
     }
     isar.writeTxnSync(() {
       final mangaId = isar.mangas.putSync(manga);
@@ -150,13 +157,14 @@ Future<dynamic> updateMangaDetail(
         );
       }
     });
+    return getManga;
   } catch (e, s) {
     if (showToast) {
       botToast('$e\n$s');
     } else {
       rethrow;
     }
-    return;
+    return null;
   }
 }
 

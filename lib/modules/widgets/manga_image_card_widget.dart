@@ -373,26 +373,59 @@ Future<void> pushToMangaReaderDetail({
         });
       }
 
-      mangaId = isar.mangas
+      final matchingEntries = isar.mangas
           .filter()
           .langEqualTo(lang)
           .nameEqualTo(manga.name)
           .sourceEqualTo(manga.source)
-          .findAllSync()
-          .firstWhere(
-            (element) =>
-                element.sourceId == null ? true : element.sourceId == sourceId,
-          )
-          .id!;
+          .findAllSync();
+      final matchedManga = matchingEntries.firstWhere(
+        (element) => element.sourceId == sourceId,
+        orElse: () => matchingEntries.first,
+      );
+      mangaId = matchedManga.id!;
     } else {
       mangaId = archiveId;
     }
   }
 
   final mang = isar.mangas.getSync(mangaId);
-  if (mang!.sourceId == null && !(mang.isLocalArchive ?? false)) {
+  if (mang != null &&
+      !(mang.isLocalArchive ?? false) &&
+      getManga != null &&
+      archiveId == null) {
     isar.writeTxnSync(() {
-      isar.mangas.putSync(mang..sourceId = sourceId);
+      isar.mangas.putSync(
+        mang
+          ..sourceId = sourceId
+          ..link = getManga.link?.trim().isNotEmpty == true
+              ? getManga.link!.trim()
+              : mang.link
+          ..imageUrl = getManga.imageUrl?.trim().isNotEmpty == true
+              ? getManga.imageUrl!.trim()
+              : mang.imageUrl
+          ..name = getManga.name?.trim().isNotEmpty == true
+              ? getManga.name!.trim()
+              : mang.name
+          ..author = getManga.author?.trim().isNotEmpty == true
+              ? getManga.author!.trim()
+              : mang.author
+          ..artist = getManga.artist?.trim().isNotEmpty == true
+              ? getManga.artist!.trim()
+              : mang.artist
+          ..description = getManga.description?.trim().isNotEmpty == true
+              ? getManga.description!.trim()
+              : mang.description
+          ..genre =
+              getManga.genre?.isNotEmpty == true
+              ? getManga.genre!.map((e) => e.toString()).toList()
+              : mang.genre
+          ..status = getManga.status ?? mang.status
+          ..itemType = itemType ?? mang.itemType
+          ..lang = lang
+          ..source = source
+          ..updatedAt = DateTime.now().millisecondsSinceEpoch,
+      );
     });
   }
   final settings = isar.settings.getSync(227)!;

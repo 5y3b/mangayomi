@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:isar_community/isar.dart';
 import 'package:mangayomi/eval/model/m_bridge.dart';
+import 'package:mangayomi/eval/model/m_manga.dart';
 import 'package:mangayomi/main.dart';
 import 'package:mangayomi/models/category.dart';
 import 'package:mangayomi/models/chapter.dart';
@@ -51,6 +52,7 @@ import 'package:mangayomi/modules/manga/detail/widgets/chapter_sort_list_tile_wi
 import 'package:mangayomi/modules/manga/download/providers/download_provider.dart';
 import 'package:mangayomi/modules/widgets/error_text.dart';
 import 'package:mangayomi/modules/widgets/progress_center.dart';
+import 'package:mangayomi/modules/widgets/manga_image_card_widget.dart';
 import 'package:photo_view/photo_view.dart';
 import 'package:photo_view/photo_view_gallery.dart';
 import 'package:share_plus/share_plus.dart';
@@ -64,6 +66,7 @@ class MangaDetailView extends ConsumerStatefulWidget {
   final List<Color>? backButtonColors;
   final Widget? action;
   final Manga? manga;
+  final List<MManga> seasons;
   final bool sourceExist;
   final Function(bool) checkForUpdate;
   final ItemType itemType;
@@ -76,6 +79,7 @@ class MangaDetailView extends ConsumerStatefulWidget {
     this.action,
     required this.sourceExist,
     required this.manga,
+    this.seasons = const [],
     required this.checkForUpdate,
     required this.itemType,
   });
@@ -1820,6 +1824,98 @@ class _MangaDetailViewState extends ConsumerState<MangaDetailView>
                         );
                       },
                     ),
+                  if (widget.manga!.itemType == ItemType.anime)
+                    if (widget.seasons.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                        child: Card(
+                          elevation: 0,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Padding(
+                                  padding: EdgeInsets.symmetric(
+                                    horizontal: 16,
+                                    vertical: 8,
+                                  ),
+                                  child: Text(
+                                    "Seasons",
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                                for (final season in widget.seasons)
+                                  ListTile(
+                                    dense: true,
+                                    onTap: () async {
+                                      await pushToMangaReaderDetail(
+                                        getManga: season,
+                                        ref: ref,
+                                        lang: widget.manga!.lang!,
+                                        context: context,
+                                        source: widget.manga!.source!,
+                                        sourceId: widget.manga!.sourceId,
+                                        itemType: ItemType.anime,
+                                      );
+                                    },
+                                    leading:
+                                        season.imageUrl?.isNotEmpty == true
+                                        ? ClipRRect(
+                                            borderRadius:
+                                                BorderRadius.circular(6),
+                                            child: SizedBox(
+                                              width: 36,
+                                              height: 52,
+                                              child: cachedNetworkImage(
+                                                imageUrl: toImgUrl(
+                                                  season.imageUrl!,
+                                                ),
+                                                width: 36,
+                                                height: 52,
+                                                fit: BoxFit.cover,
+                                                headers:
+                                                    widget.manga!.isLocalArchive!
+                                                    ? null
+                                                    : ref.watch(
+                                                        headersProvider(
+                                                          source: widget
+                                                              .manga!
+                                                              .source!,
+                                                          lang: widget
+                                                              .manga!
+                                                              .lang!,
+                                                          sourceId: widget
+                                                              .manga!
+                                                              .sourceId,
+                                                        ),
+                                                      ),
+                                              ),
+                                            ),
+                                          )
+                                        : const Icon(
+                                            Icons.movie_filter_outlined,
+                                            size: 20,
+                                          ),
+                                    title: Text(
+                                      season.name?.isNotEmpty == true
+                                          ? season.name!
+                                          : "Season",
+                                    ),
+                                    trailing: const Icon(
+                                      Icons.chevron_right_rounded,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
                   const SizedBox(height: 15),
                   if (!context.isTablet)
                     Column(

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:isar_community/isar.dart';
+import 'package:mangayomi/eval/model/m_manga.dart';
 import 'package:mangayomi/main.dart';
 import 'package:mangayomi/models/source.dart';
 import 'package:mangayomi/modules/manga/detail/manga_details_view.dart';
@@ -18,6 +19,8 @@ class MangaReaderDetail extends ConsumerStatefulWidget {
 }
 
 class _MangaReaderDetailState extends ConsumerState<MangaReaderDetail> {
+  List<MManga> _seasons = const [];
+
   @override
   void initState() {
     super.initState();
@@ -27,11 +30,12 @@ class _MangaReaderDetailState extends ConsumerState<MangaReaderDetail> {
   Future<void> _init() async {
     // Wait for the widget tree to settle before loading detail
     await WidgetsBinding.instance.endOfFrame;
-    await ref.read(
+    final detail = await ref.read(
       updateMangaDetailProvider(mangaId: widget.mangaId, isInit: true).future,
     );
     if (mounted) {
       setState(() {
+        _seasons = detail?.seasons ?? const [];
         _isLoading = false;
       });
     }
@@ -64,18 +68,24 @@ class _MangaReaderDetailState extends ConsumerState<MangaReaderDetail> {
               return RefreshIndicator(
                 onRefresh: () async {
                   if (sourceExist && !_isLoading) {
-                    await ref.read(
+                    final detail = await ref.read(
                       updateMangaDetailProvider(
                         mangaId: manga.id,
                         isInit: false,
                       ).future,
                     );
+                    if (mounted) {
+                      setState(() {
+                        _seasons = detail?.seasons ?? const [];
+                      });
+                    }
                   }
                 },
                 child: Stack(
                   children: [
                     MangaDetailsView(
                       manga: manga,
+                      seasons: _seasons,
                       sourceExist: sourceExist,
                       checkForUpdate: (value) async {
                         if (!_isLoading) {
@@ -83,12 +93,13 @@ class _MangaReaderDetailState extends ConsumerState<MangaReaderDetail> {
                             _isLoading = true;
                           });
                           if (sourceExist) {
-                            await ref.read(
+                            final detail = await ref.read(
                               updateMangaDetailProvider(
                                 mangaId: manga.id,
                                 isInit: false,
                               ).future,
                             );
+                            _seasons = detail?.seasons ?? const [];
                           }
                           if (mounted) {
                             setState(() {

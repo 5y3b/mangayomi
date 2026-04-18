@@ -331,6 +331,11 @@ class TestSource extends MProvider {
   @override
   Future<MManga> getDetail(String url) async {
     // TODO: implement
+    // For anime, you can also return:
+    // MManga(
+    //   ...,
+    //   seasons: [MManga(name: "Season 2", link: "...")],
+    // )
   }
   
   // For novel html content
@@ -405,6 +410,8 @@ class DefaultExtension extends MProvider {
     }
     async getDetail(url) {
         throw new Error("getDetail not implemented");
+        // For anime, you can also return:
+        // { ..., seasons: [{ name: "Season 2", link: "..." }] }
     }
     // For novel html content
     async getHtmlContent(name, url) {
