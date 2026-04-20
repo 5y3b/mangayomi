@@ -7,11 +7,10 @@ import 'package:flutter_riverpod/misc.dart' show ProviderListenable;
 import 'package:mangayomi/models/chapter.dart';
 import 'package:mangayomi/models/settings.dart';
 import 'package:mangayomi/modules/manga/reader/providers/reader_controller_provider.dart';
+import 'package:mangayomi/modules/manga/reader/widgets/reader_mode/reader_mode_sheet.dart';
 import 'package:mangayomi/modules/manga/reader/widgets/custom_value_indicator_shape.dart';
 import 'package:mangayomi/modules/more/settings/reader/providers/reader_state_provider.dart';
-import 'package:mangayomi/modules/more/settings/reader/reader_screen.dart';
 import 'package:mangayomi/utils/extensions/build_context_extensions.dart';
-import 'package:mangayomi/utils/global_style.dart';
 
 /// The bottom bar for the manga reader.
 ///
@@ -323,37 +322,9 @@ class ReaderBottomBar extends ConsumerWidget {
         mainAxisAlignment: MainAxisAlignment.spaceAround,
         children: [
           // Reader mode button
-          PopupMenuButton<ReaderMode>(
-            popUpAnimationStyle: popupAnimationStyle,
-            color: Colors.black,
-            onSelected: (value) {
-              onReaderModeChanged(value, ref);
-            },
-            itemBuilder: (context) => [
-              for (var mode in ReaderMode.values)
-                PopupMenuItem(
-                  value: mode,
-                  child: Row(
-                    children: [
-                      Icon(
-                        Icons.check,
-                        color: readerMode == mode
-                            ? Colors.white
-                            : Colors.transparent,
-                      ),
-                      const SizedBox(width: 7),
-                      Text(
-                        getReaderModeName(mode, context),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-            ],
-            child: const Icon(Icons.app_settings_alt_outlined),
+          IconButton(
+            onPressed: () => _showReaderModeMenu(context, ref, readerMode),
+            icon: const Icon(Icons.app_settings_alt_outlined),
           ),
 
           // Crop borders button
@@ -403,6 +374,20 @@ class ReaderBottomBar extends ConsumerWidget {
           ),
         ],
       ),
+    );
+  }
+
+  Future<void> _showReaderModeMenu(
+    BuildContext context,
+    WidgetRef ref,
+    ReaderMode? readerMode,
+  ) async {
+    final defaultMode = ref.read(defaultReadingModeStateProvider);
+    await ReaderModeSheet.show(
+      context: context,
+      currentMode: readerMode ?? defaultMode,
+      defaultMode: defaultMode,
+      onApply: (selectedMode) => onReaderModeChanged(selectedMode, ref),
     );
   }
 }
