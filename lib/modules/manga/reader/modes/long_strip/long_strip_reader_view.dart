@@ -1,16 +1,19 @@
 import 'package:flutter/material.dart';
+import 'dart:math' as math;
+
+import 'package:flutter/gestures.dart';
+import 'package:mangayomi/modules/manga/reader/modes/long_strip/long_strip_image_view.dart';
+import 'package:mangayomi/modules/manga/reader/modes/long_strip/long_strip_transition_view.dart';
+import 'package:mangayomi/modules/manga/reader/modes/reader_modes.dart';
 import 'package:mangayomi/modules/manga/reader/widgets/double_page_view.dart';
-import 'package:mangayomi/modules/manga/reader/image_view_vertical.dart';
 import 'package:mangayomi/modules/manga/reader/u_chap_data_preload.dart';
-import 'package:mangayomi/modules/manga/reader/widgets/transition_view_vertical.dart';
 import 'package:mangayomi/modules/more/settings/reader/reader_screen.dart';
-import 'package:photo_view/photo_view.dart';
-import 'package:photo_view/photo_view_gallery.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:mangayomi/models/settings.dart';
 
 /// Main widget for virtual reading that replaces ScrollablePositionedList
 class ImageViewWebtoon extends StatelessWidget {
+  final Key? containerKey;
   final List<UChapDataPreload> pages;
   final ItemScrollController itemScrollController;
   final ScrollOffsetController scrollOffsetController;
@@ -25,10 +28,13 @@ class ImageViewWebtoon extends StatelessWidget {
   final bool isDoublePageMode;
   final bool isHorizontalContinuous;
   final ReaderMode readerMode;
-  final PhotoViewController photoViewController;
-  final PhotoViewScaleStateController photoViewScaleStateController;
-  final Alignment scalePosition;
-  final Function(ScaleEndDetails) onScaleEnd;
+  final double scale;
+  final Offset panOffset;
+  final void Function(PointerSignalEvent)? onPointerSignal;
+  final void Function(PointerDownEvent)? onPointerDown;
+  final void Function(PointerMoveEvent)? onPointerMove;
+  final void Function(PointerUpEvent)? onPointerUp;
+  final void Function(PointerCancelEvent)? onPointerCancel;
   final Function(Offset) onDoubleTapDown;
   final VoidCallback onDoubleTap;
   final int webtoonSidePadding;
@@ -38,6 +44,7 @@ class ImageViewWebtoon extends StatelessWidget {
 
   const ImageViewWebtoon({
     super.key,
+    this.containerKey,
     required this.pages,
     required this.itemScrollController,
     required this.scrollOffsetController,
@@ -52,10 +59,13 @@ class ImageViewWebtoon extends StatelessWidget {
     required this.isDoublePageMode,
     required this.isHorizontalContinuous,
     required this.readerMode,
-    required this.photoViewController,
-    required this.photoViewScaleStateController,
-    required this.scalePosition,
-    required this.onScaleEnd,
+    required this.scale,
+    required this.panOffset,
+    this.onPointerSignal,
+    this.onPointerDown,
+    this.onPointerMove,
+    this.onPointerUp,
+    this.onPointerCancel,
     required this.onDoubleTapDown,
     required this.onDoubleTap,
     required this.isScrolling,
@@ -66,17 +76,26 @@ class ImageViewWebtoon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return PhotoViewGallery.builder(
-      itemCount: 1,
-      builder: (_, _) => PhotoViewGalleryPageOptions.customChild(
-        controller: photoViewController,
-        scaleStateController: photoViewScaleStateController,
-        basePosition: scalePosition,
-        onScaleEnd: (context, details, controllerValue) => onScaleEnd(details),
-        child: ScrollablePositionedList.separated(
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        const scaleAlignment = Alignment.center;
+        final safeScale = math.max(scale, 0.01);
+        final logicalViewportWidth =
+            scale < 1 && scrollDirection == Axis.horizontal
+            ? constraints.maxWidth / safeScale
+            : constraints.maxWidth;
+        final logicalViewportHeight =
+            scale < 1 && scrollDirection == Axis.vertical
+            ? constraints.maxHeight / safeScale
+            : constraints.maxHeight;
+        final effectiveCacheExtent = scale < 1
+            ? minCacheExtent / safeScale
+            : minCacheExtent;
+
+        Widget content = ScrollablePositionedList.separated(
           scrollDirection: scrollDirection,
           reverse: reverse,
-          minCacheExtent: minCacheExtent,
+          minCacheExtent: effectiveCacheExtent,
           initialScrollIndex: initialScrollIndex,
           itemCount: pages.length,
           physics: physics,
@@ -85,8 +104,46 @@ class ImageViewWebtoon extends StatelessWidget {
           itemPositionsListener: itemPositionsListener,
           itemBuilder: (context, index) => _buildItem(context, index),
           separatorBuilder: _buildSeparator,
-        ),
-      ),
+        );
+
+        content = Align(
+          alignment: scaleAlignment,
+          child: Transform.translate(
+            offset: panOffset,
+            child: Transform.scale(
+              scale: scale,
+              alignment: scaleAlignment,
+              child: OverflowBox(
+                alignment: scaleAlignment,
+                minWidth: logicalViewportWidth,
+                maxWidth: logicalViewportWidth,
+                minHeight: logicalViewportHeight,
+                maxHeight: logicalViewportHeight,
+                child: SizedBox(
+                  width: logicalViewportWidth,
+                  height: logicalViewportHeight,
+                  child: content,
+                ),
+              ),
+            ),
+          ),
+        );
+
+        return Listener(
+          key: containerKey,
+          behavior: HitTestBehavior.translucent,
+          onPointerSignal: onPointerSignal,
+          onPointerDown: onPointerDown,
+          onPointerMove: onPointerMove,
+          onPointerUp: onPointerUp,
+          onPointerCancel: onPointerCancel,
+          child: SizedBox(
+            width: constraints.maxWidth,
+            height: constraints.maxHeight,
+            child: content,
+          ),
+        );
+      },
     );
   }
 
@@ -168,7 +225,7 @@ class ImageViewWebtoon extends StatelessWidget {
   }
 
   Widget _buildSeparator(BuildContext context, int index) {
-    if (!showPageGaps || readerMode == ReaderMode.webtoon) {
+    if (!showPageGaps || !isReaderModeLongStripWithGaps(readerMode)) {
       return const SizedBox.shrink();
     }
 

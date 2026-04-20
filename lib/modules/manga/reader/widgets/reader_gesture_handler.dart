@@ -252,7 +252,7 @@ class ReaderGestureHandler extends StatelessWidget {
 }
 
 /// Individual gesture detector for a zone.
-class _ZoneGestureDetector extends StatelessWidget {
+class _ZoneGestureDetector extends StatefulWidget {
   final VoidCallback onTap;
   final void Function(Offset position)? onDoubleTapDown;
   final VoidCallback? onDoubleTap;
@@ -268,18 +268,25 @@ class _ZoneGestureDetector extends StatelessWidget {
   });
 
   @override
+  State<_ZoneGestureDetector> createState() => _ZoneGestureDetectorState();
+}
+
+class _ZoneGestureDetectorState extends State<_ZoneGestureDetector> {
+
+  @override
   Widget build(BuildContext context) {
     return GestureDetector(
       behavior: HitTestBehavior.translucent,
-      onTap: onTap,
-      onDoubleTapDown: onDoubleTapDown != null
-          ? (details) => onDoubleTapDown!(details.globalPosition)
+      onTap: widget.onTap,
+      onDoubleTapDown: widget.onDoubleTapDown != null
+          ? (details) => widget.onDoubleTapDown!(details.globalPosition)
           : null,
-      onDoubleTap: onDoubleTap,
-      onSecondaryTapDown: onSecondaryTapDown != null
-          ? (details) => onSecondaryTapDown!(details.globalPosition)
+      onDoubleTap: widget.onDoubleTap,
+      onSecondaryTapDown: widget.onSecondaryTapDown != null
+          ? (details) => widget.onSecondaryTapDown!(details.globalPosition)
           : null,
-      onSecondaryTap: onSecondaryTap,
+      onSecondaryTap: widget.onSecondaryTap,
+      onDoubleTapCancel: () => {},
     );
   }
 }

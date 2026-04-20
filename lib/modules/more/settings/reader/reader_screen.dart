@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mangayomi/models/settings.dart';
+import 'package:mangayomi/modules/manga/reader/modes/reader_modes.dart';
 import 'package:mangayomi/providers/l10n_providers.dart';
 import 'package:mangayomi/utils/extensions/build_context_extensions.dart';
 import 'package:mangayomi/modules/more/settings/reader/providers/reader_state_provider.dart';
@@ -13,7 +14,9 @@ class ReaderScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final defaultReadingMode = ref.watch(defaultReadingModeStateProvider);
+    final defaultReadingMode = normalizeReaderMode(
+      ref.watch(defaultReadingModeStateProvider),
+    );
     final animatePageTransitions = ref.watch(
       animatePageTransitionsStateProvider,
     );
@@ -55,20 +58,16 @@ class ReaderScreen extends ConsumerWidget {
                           },
                           child: SuperListView.builder(
                             shrinkWrap: true,
-                            itemCount: ReaderMode.values.length,
+                            itemCount: supportedReaderModes.length,
                             itemBuilder: (context, index) {
+                              final mode = supportedReaderModes[index];
                               return RadioListTile(
                                 dense: true,
                                 contentPadding: const EdgeInsets.all(0),
-                                value: ReaderMode.values[index],
+                                value: mode,
                                 title: Row(
                                   children: [
-                                    Text(
-                                      getReaderModeName(
-                                        ReaderMode.values[index],
-                                        context,
-                                      ),
-                                    ),
+                                    Text(getReaderModeName(mode, context)),
                                   ],
                                 ),
                               );
@@ -473,16 +472,12 @@ class ReaderScreen extends ConsumerWidget {
 }
 
 String getReaderModeName(ReaderMode readerMode, BuildContext context) {
-  return switch (readerMode) {
-    ReaderMode.vertical => context.l10n.reading_mode_vertical,
-    ReaderMode.verticalContinuous =>
-      context.l10n.reading_mode_vertical_continuous,
-    ReaderMode.ltr => context.l10n.reading_mode_left_to_right,
-    ReaderMode.rtl => context.l10n.reading_mode_right_to_left,
-    ReaderMode.horizontalContinuous => context.l10n.horizontal_continious,
-    ReaderMode.horizontalContinuousRTL =>
-      "${context.l10n.horizontal_continious} (RTL)",
-    _ => context.l10n.reading_mode_webtoon,
+  return switch (normalizeReaderMode(readerMode)) {
+    ReaderMode.ltr => 'Paged (Left to Right)',
+    ReaderMode.rtl => 'Paged (Right to Left)',
+    ReaderMode.vertical => 'Paged (Vertical)',
+    ReaderMode.verticalContinuous => 'Long Strip with Gaps',
+    _ => 'Long Strip',
   };
 }
 

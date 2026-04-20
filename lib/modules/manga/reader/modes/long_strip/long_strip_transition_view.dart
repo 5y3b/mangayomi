@@ -6,8 +6,13 @@ import 'package:mangayomi/utils/extensions/build_context_extensions.dart';
 
 class TransitionViewVertical extends ConsumerWidget {
   final UChapDataPreload data;
+  final bool fillParent;
 
-  const TransitionViewVertical({super.key, required this.data});
+  const TransitionViewVertical({
+    super.key,
+    required this.data,
+    this.fillParent = false,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -15,13 +20,16 @@ class TransitionViewVertical extends ConsumerWidget {
       return const SizedBox.shrink();
     }
 
-    return SizedBox(
-      height: context.height(1),
-      child: ChapterTransitionPage(
-        currentChapter: data.chapter!,
-        nextChapter: data.nextChapter,
-        mangaName: data.mangaName ?? '',
-      ),
+    final child = ChapterTransitionPage(
+      currentChapter: data.chapter!,
+      nextChapter: data.nextChapter,
+      mangaName: data.mangaName ?? '',
     );
+
+    if (fillParent) {
+      return SizedBox.expand(child: ClipRect(child: child));
+    }
+
+    return SizedBox(height: context.height(1), child: child);
   }
 }

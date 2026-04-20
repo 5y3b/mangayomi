@@ -1,12 +1,14 @@
+import 'dart:io';
+
 import 'package:extended_image/extended_image.dart';
 import 'package:flutter/material.dart';
 import 'package:mangayomi/main.dart';
 import 'package:mangayomi/models/settings.dart';
-import 'package:mangayomi/modules/manga/reader/image_view_paged.dart';
+import 'package:mangayomi/modules/manga/reader/modes/long_strip/long_strip_transition_view.dart';
+import 'package:mangayomi/modules/manga/reader/modes/paged/paged_image_view.dart';
+import 'package:mangayomi/modules/manga/reader/modes/paged/paged_transition_view.dart';
 import 'package:mangayomi/modules/manga/reader/u_chap_data_preload.dart';
 import 'package:mangayomi/modules/manga/reader/widgets/circular_progress_indicator_animate_rotate.dart';
-import 'package:mangayomi/modules/manga/reader/widgets/transition_view_paged.dart';
-import 'package:mangayomi/modules/manga/reader/widgets/transition_view_vertical.dart';
 import 'package:mangayomi/modules/more/settings/reader/reader_screen.dart';
 import 'package:mangayomi/providers/l10n_providers.dart';
 import 'package:mangayomi/utils/extensions/build_context_extensions.dart';
@@ -84,12 +86,15 @@ class _DoublePageViewState extends State<DoublePageView>
       PhotoViewScaleStateController();
 
   Duration _doubleTapAnimationDuration() {
+    if (Platform.isAndroid || Platform.isIOS) {
+      return const Duration(milliseconds: 150);
+    }
     final doubleTapAnimationValue =
         isar.settings.getSync(227)?.doubleTapAnimationSpeed ?? 1;
     return switch (doubleTapAnimationValue) {
-      0 => const Duration(milliseconds: 10),
-      1 => const Duration(milliseconds: 800),
-      _ => const Duration(milliseconds: 200),
+      0 => const Duration(milliseconds: 120),
+      1 => const Duration(milliseconds: 260),
+      _ => const Duration(milliseconds: 180),
     };
   }
 

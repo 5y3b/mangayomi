@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:extended_image/extended_image.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/material.dart';
@@ -22,26 +25,46 @@ import 'package:mangayomi/modules/manga/reader/widgets/reader_settings_modal.dar
 import 'package:mangayomi/modules/manga/reader/widgets/auto_scroll_button.dart';
 import 'package:mangayomi/modules/manga/reader/widgets/page_indicator.dart';
 import 'package:mangayomi/modules/manga/reader/widgets/image_actions_dialog.dart';
+import 'package:mangayomi/modules/manga/reader/modes/long_strip/long_strip_reader_view.dart';
+import 'package:mangayomi/modules/manga/reader/modes/long_strip/long_strip_image_view.dart';
+import 'package:mangayomi/modules/manga/reader/modes/long_strip/long_strip_transition_view.dart';
+import 'package:mangayomi/modules/manga/reader/modes/paged/paged_image_view.dart';
+import 'package:mangayomi/modules/manga/reader/modes/paged/paged_transition_view.dart';
+import 'package:mangayomi/modules/manga/reader/modes/reader_modes.dart';
+import 'package:mangayomi/modules/manga/reader/reader_canvas/canvas_reader_view.dart';
+import 'package:mangayomi/modules/manga/reader/reader_canvas/navigation_policies.dart';
+import 'package:mangayomi/modules/manga/reader/reader_canvas/reader_camera_controller.dart';
+import 'package:mangayomi/modules/manga/reader/reader_canvas/reader_mode_config.dart';
+import 'package:mangayomi/modules/manga/reader/reader_canvas/reader_scene.dart';
 import 'package:mangayomi/modules/more/settings/reader/providers/reader_state_provider.dart';
 import 'package:mangayomi/providers/l10n_providers.dart';
 import 'package:mangayomi/utils/riverpod.dart';
 import 'package:mangayomi/modules/manga/reader/providers/push_router.dart';
 import 'package:mangayomi/services/get_chapter_pages.dart';
 import 'package:mangayomi/utils/extensions/build_context_extensions.dart';
-import 'package:mangayomi/modules/manga/reader/image_view_paged.dart';
+import 'package:mangayomi/modules/manga/reader/u_chap_data_preload.dart';
 import 'package:mangayomi/modules/manga/reader/providers/reader_controller_provider.dart';
 import 'package:mangayomi/modules/manga/reader/widgets/circular_progress_indicator_animate_rotate.dart';
-import 'package:mangayomi/modules/manga/reader/widgets/transition_view_paged.dart';
 import 'package:mangayomi/modules/more/settings/reader/reader_screen.dart';
 import 'package:mangayomi/modules/manga/reader/providers/manga_reader_provider.dart';
-import 'package:mangayomi/modules/manga/reader/image_view_webtoon.dart';
 import 'package:mangayomi/modules/widgets/progress_center.dart';
-import 'package:photo_view/photo_view.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:window_manager/window_manager.dart';
 
 typedef DoubleClickAnimationListener = void Function();
+
+class _CanvasAnchor {
+  const _CanvasAnchor({
+    required this.pageData,
+    required this.localOffset,
+    required this.viewportPoint,
+  });
+
+  final UChapDataPreload pageData;
+  final Offset localOffset;
+  final Offset viewportPoint;
+}
 
 class MangaReaderView extends ConsumerStatefulWidget {
   final int chapterId;
@@ -145,7 +168,16 @@ class _MangaChapterPageGalleryState
         ReaderMemoryManagement,
         PageNavigationMixin {
   late AnimationController _scaleAnimationController;
-  late Animation<double> _animation;
+  Animation<double>? _continuousScaleAnimation;
+  Animation<Offset>? _continuousPanAnimation;
+  VoidCallback? _continuousScaleAnimationListener;
+
+  Ticker? _continuousFlingTicker;
+  Duration? _continuousFlingLastTimestamp;
+  Offset _continuousFlingVelocity = Offset.zero;
+
+  Offset? _continuousVelocitySamplePosition;
+  Duration? _continuousVelocitySampleTime;
 
   late ReaderController _readerController = ref.read(
     readerControllerProvider(chapter: chapter).notifier,
@@ -171,6 +203,12 @@ class _MangaChapterPageGalleryState
     );
     _rebuildDetail.close();
     _doubleClickAnimationController.dispose();
+    if (_continuousScaleAnimationListener != null &&
+        _continuousScaleAnimation != null) {
+      _continuousScaleAnimation!.removeListener(
+        _continuousScaleAnimationListener!,
+      );
+    }
     _scaleAnimationController.dispose();
     _failedToLoadImage.dispose();
     _autoScroll.value = false;
@@ -179,8 +217,8 @@ class _MangaChapterPageGalleryState
     _scrollIdleTimer?.cancel();
     _isScrolling.dispose();
     _itemPositionsListener.itemPositions.removeListener(_readProgressListener);
-    _photoViewController.dispose();
-    _photoViewScaleStateController.dispose();
+    _canvasCameraController.removeListener(_onCanvasCameraChanged);
+    _canvasCameraController.dispose();
     _extendedController.dispose();
     clearGestureDetailsCache();
     if (_isNavigatingToChapter) {
@@ -205,6 +243,7 @@ class _MangaChapterPageGalleryState
     disposePreloadManager();
     _readerController.keepAliveLink?.close();
     WakelockPlus.disable();
+    _continuousFlingTicker?.dispose();
     super.dispose();
   }
 
@@ -243,6 +282,21 @@ class _MangaChapterPageGalleryState
   final ScrollOffsetController _pageOffsetController = ScrollOffsetController();
   final ItemPositionsListener _itemPositionsListener =
       ItemPositionsListener.create();
+  late final ReaderCameraController _canvasCameraController =
+      ReaderCameraController();
+  ReaderScene _canvasScene = ReaderScene.empty;
+  Size _canvasViewportSize = Size.zero;
+  bool _canvasCameraInitialized = false;
+  bool _canvasSceneSyncScheduled = false;
+  bool _canvasRebuildScheduled = false;
+  bool _canvasStateSyncScheduled = false;
+  final List<VoidCallback> _pendingCanvasStateActions = [];
+  _CanvasAnchor? _pendingCanvasAnchor;
+  int? _canvasVisiblePageIndex;
+  bool _canvasPageUpdateScheduled = false;
+  int? _pendingCanvasPageIndex;
+  bool _isCanvasSliderInteractionActive = false;
+  int? _activeCanvasSliderChapterId;
 
   late AnimationController _doubleClickAnimationController;
 
@@ -251,6 +305,12 @@ class _MangaChapterPageGalleryState
   List<double> doubleTapScales = <double>[1.0, 2.0];
   final StreamController<double> _rebuildDetail =
       StreamController<double>.broadcast();
+  static const double _continuousBaseScale = 1.0;
+  static const double _continuousMinScale = 0.35;
+  static const double _continuousMaxScale = 6.0;
+  static const double _continuousDoubleTapScale = 2.0;
+  static const double _continuousWheelZoomFactor = 0.12;
+
   @override
   void initState() {
     super.initState();
@@ -260,13 +320,9 @@ class _MangaChapterPageGalleryState
       vsync: this,
     );
     _scaleAnimationController = AnimationController(
-      duration: _doubleTapAnimationDuration(),
+      duration: _continuousDoubleTapAnimationDuration(),
       vsync: this,
     );
-    _animation = Tween(begin: 1.0, end: 2.0).animate(
-      CurvedAnimation(curve: Curves.ease, parent: _scaleAnimationController),
-    );
-    _animation.addListener(() => _photoViewController.scale = _animation.value);
     _itemPositionsListener.itemPositions.addListener(_readProgressListener);
     initPageNavigation(
       itemScrollController: _itemScrollController,
@@ -276,6 +332,8 @@ class _MangaChapterPageGalleryState
     discordRpc?.showChapterDetails(ref, chapter);
     WidgetsBinding.instance.addObserver(this);
     _initWakelock();
+    _continuousFlingTicker = createTicker(_onContinuousFlingTick);
+    _canvasCameraController.addListener(_onCanvasCameraChanged);
   }
 
   void _initWakelock() {
@@ -300,41 +358,944 @@ class _MangaChapterPageGalleryState
   final _currentReaderMode = StateProvider<ReaderMode?>(() => null);
   PageMode? _pageMode;
   bool _isView = false;
-  Alignment _scalePosition = Alignment.center;
-  final PhotoViewController _photoViewController = PhotoViewController();
-  final PhotoViewScaleStateController _photoViewScaleStateController =
-      PhotoViewScaleStateController();
+  double _continuousScale = _continuousBaseScale;
+  double _continuousGestureStartScale = _continuousBaseScale;
+  Offset _continuousGestureStartPan = Offset.zero;
+  double _continuousPinchStartDistance = 0;
+  Offset _continuousPinchStartFocalPoint = Offset.zero;
+  Offset _continuousLastSinglePointerPosition = Offset.zero;
+  Offset _continuousPanOffset = Offset.zero;
+  int _continuousPointerCount = 0;
+  bool _desktopZoomModifierPressed = false;
+  bool _continuousScrollFrameScheduled = false;
+  double _continuousQueuedScrollDelta = 0;
+  final Map<int, Offset> _continuousActivePointers = {};
   final List<int> _cropBorderCheckList = [];
-
-  void _onScaleEnd(
-    BuildContext context,
-    ScaleEndDetails details,
-    PhotoViewControllerValue controllerValue,
-  ) {
-    if (controllerValue.scale! < 1) {
-      _photoViewScaleStateController.reset();
-    }
-  }
+  final GlobalKey _continuousCanvasKey = GlobalKey();
 
   late final _extendedController = ExtendedPageController(
     initialPage: _currentIndex!,
   );
-
-  double get pixelRatio => View.of(context).devicePixelRatio;
-
-  Size get size => View.of(context).physicalSize / pixelRatio;
-  Alignment _computeAlignmentByTapOffset(Offset offset) {
-    return Alignment(
-      (offset.dx - size.width / 2) / (size.width / 2),
-      (offset.dy - size.height / 2) / (size.height / 2),
-    );
-  }
 
   Axis _scrollDirection = Axis.vertical;
   bool _isReverseHorizontal = false;
 
   Color _backgroundColor(BuildContext context) =>
       Theme.of(context).scaffoldBackgroundColor.withValues(alpha: 0.9);
+
+  bool _usesCanvasEngine(ReaderMode? readerMode) {
+    if (readerMode == null) {
+      return false;
+    }
+    final normalizedMode = normalizeReaderMode(readerMode);
+    return normalizedMode == ReaderMode.webtoon ||
+        normalizedMode == ReaderMode.verticalContinuous;
+  }
+
+  ReaderCanvasModeConfig _canvasModeConfig(
+    ReaderMode readerMode, {
+    double viewportWidth = 0,
+  }) {
+    final showPageGaps = ref.read(showPageGapsStateProvider);
+    final sidePaddingPercent = ref.read(webtoonSidePaddingStateProvider);
+    final sidePadding = viewportWidth * sidePaddingPercent / 100;
+    return ReaderCanvasModeConfig.fromReaderMode(
+      readerMode,
+      longStripGap: showPageGaps ? 6 : 0,
+      longStripSidePadding: sidePadding,
+    );
+  }
+
+  ReaderScene _buildSceneForCurrentReaderMode({
+    required List<UChapDataPreload> readerPages,
+    required ReaderMode readerMode,
+    required Size viewportSize,
+  }) {
+    final config = _canvasModeConfig(
+      readerMode,
+      viewportWidth: viewportSize.width,
+    );
+    return config.sceneBuilder.build(
+      pages: readerPages,
+      viewportSize: viewportSize,
+      settings: config.sceneSettings,
+    );
+  }
+
+  ReaderScenePage? _nearestCanvasPageForWorldPoint(Offset worldPoint) {
+    if (_canvasScene.pages.isEmpty) {
+      return null;
+    }
+
+    for (final page in _canvasScene.pages) {
+      if (page.worldRect.contains(worldPoint)) {
+        return page;
+      }
+    }
+
+    ReaderScenePage? nearestPage;
+    var nearestDistance = double.infinity;
+    for (final page in _canvasScene.pages) {
+      final distance = (page.worldRect.center - worldPoint).distanceSquared;
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestPage = page;
+      }
+    }
+    return nearestPage;
+  }
+
+  ReaderScenePage? _nearestCanvasContentPageForWorldPoint(Offset worldPoint) {
+    ReaderScenePage? nearestPage;
+    var nearestDistance = double.infinity;
+    for (final page in _canvasScene.pages) {
+      if (page.isTransitionPage) {
+        continue;
+      }
+      if (page.worldRect.contains(worldPoint)) {
+        return page;
+      }
+      final distance = (page.worldRect.center - worldPoint).distanceSquared;
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestPage = page;
+      }
+    }
+    return nearestPage;
+  }
+
+  ReaderScenePage? _primaryCanvasContentPage(Rect visibleWorldRect) {
+    if (_canvasScene.pages.isEmpty) {
+      return null;
+    }
+
+    ReaderScenePage? bestPage;
+    var bestOverlapArea = -1.0;
+    for (final page in _canvasScene.pages) {
+      if (page.isTransitionPage) {
+        continue;
+      }
+      final overlap = page.worldRect.intersect(visibleWorldRect);
+      final overlapArea = overlap.isEmpty ? 0.0 : overlap.width * overlap.height;
+      if (overlapArea > bestOverlapArea) {
+        bestOverlapArea = overlapArea;
+        bestPage = page;
+      }
+    }
+
+    if (bestPage != null && bestOverlapArea > 0) {
+      return bestPage;
+    }
+
+    return _nearestCanvasContentPageForWorldPoint(visibleWorldRect.center);
+  }
+
+  int? _findCanvasScenePageIndex({
+    required int chapterId,
+    required int chapterPageIndex,
+  }) {
+    for (final page in _canvasScene.pages) {
+      final data = page.data;
+      if (data is! UChapDataPreload || page.isTransitionPage) {
+        continue;
+      }
+      if (data.chapter?.id == chapterId && data.index == chapterPageIndex) {
+        return page.pageIndex;
+      }
+    }
+    return null;
+  }
+
+  void _scheduleCanvasStateSync(VoidCallback action) {
+    if (!mounted) {
+      return;
+    }
+    _pendingCanvasStateActions.add(action);
+    if (_canvasStateSyncScheduled) {
+      return;
+    }
+    _canvasStateSyncScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _canvasStateSyncScheduled = false;
+      if (!mounted) {
+        _pendingCanvasStateActions.clear();
+        return;
+      }
+      final actions = List<VoidCallback>.from(_pendingCanvasStateActions);
+      _pendingCanvasStateActions.clear();
+      for (final pendingAction in actions) {
+        if (!mounted) {
+          break;
+        }
+        pendingAction();
+      }
+    });
+  }
+
+  void _markCanvasInteractionActive() {
+    if (!_isScrolling.value) {
+      _isScrolling.value = true;
+    }
+    _scrollIdleTimer?.cancel();
+    _scrollIdleTimer = Timer(const Duration(milliseconds: 150), () {
+      if (mounted) {
+        _isScrolling.value = false;
+      }
+    });
+  }
+
+  void _onCanvasCameraChanged() {
+    if (!_usesCanvasEngine(ref.read(_currentReaderMode)) ||
+        _canvasScene.pages.isEmpty ||
+        _canvasViewportSize.isEmpty ||
+        _isCanvasSliderInteractionActive) {
+      return;
+    }
+
+    final visibleWorldRect = _canvasCameraController.visibleWorldRect(
+      _canvasViewportSize,
+    );
+    final currentPage = _primaryCanvasContentPage(visibleWorldRect);
+    if (currentPage == null || currentPage.pageIndex == _canvasVisiblePageIndex) {
+      return;
+    }
+    _pendingCanvasPageIndex = currentPage.pageIndex;
+    if (_canvasPageUpdateScheduled) {
+      return;
+    }
+    _canvasPageUpdateScheduled = true;
+    _scheduleCanvasStateSync(() {
+      _canvasPageUpdateScheduled = false;
+      final pageIndex = _pendingCanvasPageIndex;
+      _pendingCanvasPageIndex = null;
+      if (!mounted || pageIndex == null) {
+        return;
+      }
+      _markCanvasInteractionActive();
+      if (pageIndex == _canvasVisiblePageIndex) {
+        return;
+      }
+      _canvasVisiblePageIndex = pageIndex;
+      unawaited(_onPageChanged(pageIndex));
+    });
+  }
+
+  void _scheduleCanvasSceneSync({
+    required ReaderScene scene,
+    required Size viewportSize,
+  }) {
+    _canvasScene = scene;
+    _canvasViewportSize = viewportSize;
+    if (_canvasSceneSyncScheduled) {
+      return;
+    }
+    _canvasSceneSyncScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _canvasSceneSyncScheduled = false;
+      if (!mounted || _canvasViewportSize.isEmpty || _canvasScene.pages.isEmpty) {
+        return;
+      }
+      if (!_canvasCameraInitialized) {
+        _initializeCanvasCamera();
+      } else {
+        _applyPendingCanvasAnchorIfNeeded();
+      }
+      _onCanvasCameraChanged();
+    });
+  }
+
+  void _scheduleCanvasSceneRebuild({bool preserveAnchor = true}) {
+    if (!_usesCanvasEngine(ref.read(_currentReaderMode)) || !mounted) {
+      return;
+    }
+    if (preserveAnchor && _pendingCanvasAnchor == null) {
+      _pendingCanvasAnchor = _captureCanvasAnchor();
+    }
+    if (_canvasRebuildScheduled) {
+      return;
+    }
+    _canvasRebuildScheduled = true;
+    _scheduleCanvasStateSync(() {
+      _canvasRebuildScheduled = false;
+      if (!mounted) {
+        return;
+      }
+      setState(() {});
+    });
+  }
+
+  void _initializeCanvasCamera() {
+    if (_canvasScene.pages.isEmpty || _canvasViewportSize.isEmpty) {
+      return;
+    }
+    final savedChapterIndex = _readerController.getPageIndex();
+    var targetPage = _canvasScene.pages.firstWhere(
+      (page) =>
+          (page.data as UChapDataPreload).chapter?.id == chapter.id &&
+          (page.data as UChapDataPreload).index == savedChapterIndex,
+      orElse: () => _canvasScene.pages.first,
+    );
+    final translation = Offset(
+      0,
+      -targetPage.worldRect.top,
+    );
+    _canvasCameraController.setScale(1);
+    _canvasCameraController.setTranslation(translation);
+    _canvasCameraInitialized = true;
+  }
+
+  void _applyPendingCanvasAnchorIfNeeded() {
+    final anchor = _pendingCanvasAnchor;
+    if (anchor == null) {
+      return;
+    }
+
+    final targetPage = _canvasScene.pages.firstWhere(
+      (page) => identical(page.data, anchor.pageData),
+      orElse: () => _canvasScene.pages.first,
+    );
+    final targetWorldPoint = targetPage.worldRect.topLeft + anchor.localOffset;
+    final scale = _canvasCameraController.state.scale;
+    final translation = anchor.viewportPoint - targetWorldPoint * scale;
+    _pendingCanvasAnchor = null;
+    _canvasCameraController.setTranslation(translation);
+  }
+
+  _CanvasAnchor? _captureCanvasAnchor() {
+    if (_canvasScene.pages.isEmpty || _canvasViewportSize.isEmpty) {
+      return null;
+    }
+    final viewportPoint = _canvasViewportSize.center(Offset.zero);
+    final worldPoint = _canvasCameraController.viewportToWorld(viewportPoint);
+    final page = _nearestCanvasPageForWorldPoint(worldPoint);
+    if (page == null || page.data is! UChapDataPreload) {
+      return null;
+    }
+    return _CanvasAnchor(
+      pageData: page.data! as UChapDataPreload,
+      localOffset: worldPoint - page.worldRect.topLeft,
+      viewportPoint: viewportPoint,
+    );
+  }
+
+  void _jumpToCanvasPageIndex(int pageIndex, {bool animate = true}) {
+    if (_canvasScene.pages.isEmpty ||
+        pageIndex < 0 ||
+        pageIndex >= _canvasScene.pages.length) {
+      return;
+    }
+    final targetRect = _canvasScene.pages[pageIndex].worldRect;
+    final translation = Offset(0, -targetRect.top);
+    if (animate) {
+      _canvasCameraController.animateTo(translation: translation);
+    } else {
+      _canvasCameraController.setTranslation(translation);
+    }
+  }
+
+  void _beginCanvasSliderInteraction() {
+    if (!_usesCanvasEngine(ref.read(_currentReaderMode))) {
+      return;
+    }
+    _canvasCameraController.stopMotion();
+    _isCanvasSliderInteractionActive = true;
+    _activeCanvasSliderChapterId = chapter.id;
+  }
+
+  void _endCanvasSliderInteraction() {
+    _isCanvasSliderInteractionActive = false;
+    _activeCanvasSliderChapterId = null;
+  }
+
+  void _navigateCanvasPage({required bool forward}) {
+    if (_canvasScene.pages.isEmpty) {
+      return;
+    }
+    final currentIndex = _canvasVisiblePageIndex ?? _currentIndex ?? 0;
+    final snapPolicy = const LongStripNavigationPolicy();
+    final targetRect = forward
+        ? snapPolicy.targetPageRectForNext(
+            scene: _canvasScene,
+            currentPageIndex: currentIndex,
+          )
+        : snapPolicy.targetPageRectForPrevious(
+            scene: _canvasScene,
+            currentPageIndex: currentIndex,
+          );
+    if (targetRect == null) {
+      return;
+    }
+    final targetPage = _canvasScene.pages.firstWhere(
+      (page) => page.worldRect == targetRect,
+    );
+    _jumpToCanvasPageIndex(targetPage.pageIndex);
+  }
+
+  double _currentContinuousScale() {
+    final scale = _continuousScale;
+    if (!scale.isFinite || scale == 0) {
+      return _continuousBaseScale;
+    }
+    return scale;
+  }
+
+  double _clampContinuousScale(double scale) {
+    return math.max(_continuousMinScale, math.min(_continuousMaxScale, scale));
+  }
+
+  RenderBox? _continuousCanvasRenderBox() {
+    final renderObject =
+        _continuousCanvasKey.currentContext?.findRenderObject() ??
+        context.findRenderObject();
+    if (renderObject is! RenderBox) {
+      return null;
+    }
+    return renderObject;
+  }
+
+  Offset _readerViewportCenter() {
+    final renderObject = _continuousCanvasRenderBox();
+    if (renderObject == null) {
+      final viewport = MediaQuery.sizeOf(context);
+      return Offset(viewport.width / 2, viewport.height / 2);
+    }
+    return Offset(renderObject.size.width / 2, renderObject.size.height / 2);
+  }
+
+  Offset _readerLocalPointFromGlobal(Offset globalPoint) {
+    final renderObject = _continuousCanvasRenderBox();
+    if (renderObject == null) {
+      return _readerViewportCenter();
+    }
+    return renderObject.globalToLocal(globalPoint);
+  }
+
+  Offset _panForScaleChange({
+    required double fromScale,
+    required double toScale,
+    required Offset currentPan,
+    required Offset localFocalPoint,
+  }) {
+    final safeFromScale = fromScale == 0 ? _continuousBaseScale : fromScale;
+    final ratio = toScale / safeFromScale;
+    final focalFromCenter = localFocalPoint - _readerViewportCenter();
+    final scaledPan = Offset(
+      focalFromCenter.dx + (currentPan.dx - focalFromCenter.dx) * ratio,
+      focalFromCenter.dy + (currentPan.dy - focalFromCenter.dy) * ratio,
+    );
+    return _clampContinuousPan(scaledPan, scale: toScale);
+  }
+
+  Offset _clampContinuousPan(Offset offset, {double? scale}) {
+    final currentScale = scale ?? _currentContinuousScale();
+    if (currentScale <= _continuousBaseScale + 0.01 || !mounted) {
+      return Offset.zero;
+    }
+
+    final renderObject = _continuousCanvasRenderBox();
+    final viewport = renderObject?.size ?? MediaQuery.sizeOf(context);
+    final maxDx = math.max(
+      0.0,
+      (viewport.width * currentScale - viewport.width) / 2,
+    );
+    final maxDy = math.max(
+      0.0,
+      (viewport.height * currentScale - viewport.height) / 2,
+    );
+    return Offset(
+      offset.dx.clamp(-maxDx, maxDx).toDouble(),
+      offset.dy.clamp(-maxDy, maxDy).toDouble(),
+    );
+  }
+
+  ScrollPhysics _continuousScrollPhysics() {
+    if ((isDesktop && _desktopZoomModifierPressed) ||
+        _currentContinuousScale() > _continuousBaseScale + 0.01 ||
+        _continuousPointerCount >= 2) {
+      return const NeverScrollableScrollPhysics();
+    }
+    return const ClampingScrollPhysics();
+  }
+
+  void _setContinuousScale(double targetScale, {Offset? localFocalPoint}) {
+    final clamped = _clampContinuousScale(targetScale);
+    final nextPan = localFocalPoint == null
+        ? _clampContinuousPan(_continuousPanOffset, scale: clamped)
+        : _panForScaleChange(
+            fromScale: _continuousScale,
+            toScale: clamped,
+            currentPan: _continuousPanOffset,
+            localFocalPoint: localFocalPoint,
+          );
+    if ((_continuousScale - clamped).abs() < 0.001 &&
+        (_continuousPanOffset - nextPan).distance < 0.001) {
+      return;
+    }
+    setState(() {
+      _continuousScale = clamped;
+      _continuousPanOffset = nextPan;
+    });
+  }
+
+  void _setContinuousPan(Offset offset) {
+    final clamped = _clampContinuousPan(offset);
+    if ((_continuousPanOffset - clamped).distance < 0.001) {
+      return;
+    }
+    setState(() {
+      _continuousPanOffset = clamped;
+    });
+  }
+
+  void _queueContinuousScrollDelta(double delta) {
+    if (delta.abs() < 0.01) {
+      return;
+    }
+    _continuousQueuedScrollDelta += delta;
+    if (_continuousScrollFrameScheduled) {
+      return;
+    }
+    _continuousScrollFrameScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _continuousScrollFrameScheduled = false;
+      final queuedDelta = _continuousQueuedScrollDelta;
+      _continuousQueuedScrollDelta = 0;
+      if (!mounted || queuedDelta.abs() < 0.01) {
+        return;
+      }
+      unawaited(
+        _pageOffsetController.animateScroll(
+          offset: queuedDelta,
+          duration: const Duration(milliseconds: 16),
+          curve: Curves.linear,
+        ),
+      );
+    });
+  }
+
+  void _applyContinuousDragDelta(Offset delta) {
+    final readerMode = ref.read(_currentReaderMode)!;
+    final isHorizontalContinuous =
+        readerMode == ReaderMode.horizontalContinuous ||
+        readerMode == ReaderMode.horizontalContinuousRTL;
+
+    final scrollDirectionFactor =
+        readerMode == ReaderMode.horizontalContinuousRTL ? 1.0 : -1.0;
+
+    final currentPan = _continuousPanOffset;
+    final desiredPan = _clampContinuousPan(currentPan + delta);
+
+    final consumed = desiredPan - currentPan;
+    final leftover = delta - consumed;
+
+    if (consumed.distance >= 0.001) {
+      setState(() {
+        _continuousPanOffset = desiredPan;
+      });
+    }
+
+    final mainAxisLeftover = isHorizontalContinuous ? leftover.dx : leftover.dy;
+
+    if (mainAxisLeftover.abs() >= 0.001) {
+      _queueContinuousScrollDelta(mainAxisLeftover * scrollDirectionFactor);
+    }
+  }
+
+  void _animateContinuousScale(double targetScale, {Offset? localFocalPoint}) {
+    if (_continuousScaleAnimationListener != null &&
+        _continuousScaleAnimation != null) {
+      _continuousScaleAnimation!.removeListener(
+        _continuousScaleAnimationListener!,
+      );
+    }
+
+    _scaleAnimationController
+      ..stop()
+      ..reset();
+
+    _continuousScaleAnimation =
+        Tween<double>(
+          begin: _continuousScale,
+          end: _clampContinuousScale(targetScale),
+        ).animate(
+          CurvedAnimation(
+            curve: Curves.easeOutCubic,
+            parent: _scaleAnimationController,
+          ),
+        );
+    final targetPan = localFocalPoint == null
+        ? _clampContinuousPan(_continuousPanOffset, scale: targetScale)
+        : _panForScaleChange(
+            fromScale: _continuousScale,
+            toScale: _clampContinuousScale(targetScale),
+            currentPan: _continuousPanOffset,
+            localFocalPoint: localFocalPoint,
+          );
+    _continuousPanAnimation =
+        Tween<Offset>(begin: _continuousPanOffset, end: targetPan).animate(
+          CurvedAnimation(
+            curve: Curves.easeOutCubic,
+            parent: _scaleAnimationController,
+          ),
+        );
+    _continuousScaleAnimationListener = () {
+      if (!mounted) {
+        return;
+      }
+      final nextScale = _continuousScaleAnimation!.value;
+      setState(() {
+        _continuousScale = nextScale;
+        _continuousPanOffset = nextScale <= _continuousBaseScale + 0.01
+            ? Offset.zero
+            : _clampContinuousPan(
+                _continuousPanAnimation?.value ?? _continuousPanOffset,
+                scale: nextScale,
+              );
+      });
+    };
+    _continuousScaleAnimation!.addListener(_continuousScaleAnimationListener!);
+    _scaleAnimationController.forward();
+  }
+
+  void _handleContinuousPointerSignal(PointerSignalEvent event) {
+    if (!_isContinuousMode() || event is! PointerScrollEvent) {
+      return;
+    }
+
+    final hardwareKeyboard = HardwareKeyboard.instance;
+    final wantsZoom =
+        hardwareKeyboard.isControlPressed || hardwareKeyboard.isMetaPressed;
+    if (isDesktop && wantsZoom != _desktopZoomModifierPressed && mounted) {
+      setState(() {
+        _desktopZoomModifierPressed = wantsZoom;
+      });
+    }
+    if (!wantsZoom) {
+      return;
+    }
+
+    GestureBinding.instance.pointerSignalResolver.register(event, (resolved) {
+      final scrollEvent = resolved as PointerScrollEvent;
+      final delta = scrollEvent.scrollDelta.dy == 0
+          ? scrollEvent.scrollDelta.dx
+          : scrollEvent.scrollDelta.dy;
+      if (delta == 0) {
+        return;
+      }
+
+      final currentScale = _currentContinuousScale();
+      final zoomFactor = delta > 0
+          ? 1 - _continuousWheelZoomFactor
+          : 1 + _continuousWheelZoomFactor;
+      final nextScale = _clampContinuousScale(currentScale * zoomFactor);
+      _scaleAnimationController.stop();
+      _setContinuousScale(
+        nextScale,
+        localFocalPoint: _readerLocalPointFromGlobal(scrollEvent.position),
+      );
+    });
+  }
+
+  Duration _continuousDoubleTapAnimationDuration() {
+    if (isDesktop) {
+      return const Duration(milliseconds: 210);
+    }
+    return const Duration(milliseconds: 150);
+  }
+
+  void _onContinuousPointerDown(PointerDownEvent event) {
+    if (!_isContinuousMode()) {
+      return;
+    }
+    _stopContinuousFling();
+    _continuousActivePointers[event.pointer] = event.localPosition;
+    _continuousLastSinglePointerPosition = event.localPosition;
+    if (_continuousActivePointers.length >= 2) {
+      final points = _continuousActivePointers.values.take(2).toList();
+      _scaleAnimationController.stop();
+      _continuousGestureStartScale = _currentContinuousScale();
+      _continuousGestureStartPan = _continuousPanOffset;
+      _continuousPinchStartDistance = (points[0] - points[1]).distance;
+      _continuousPinchStartFocalPoint = Offset(
+        (points[0].dx + points[1].dx) / 2,
+        (points[0].dy + points[1].dy) / 2,
+      );
+    }
+    setState(() {
+      _continuousPointerCount = _continuousActivePointers.length;
+    });
+  }
+
+  void _updateContinuousDragVelocity(Offset position, Duration timeStamp) {
+    final lastPosition = _continuousVelocitySamplePosition;
+    final lastTime = _continuousVelocitySampleTime;
+
+    _continuousVelocitySamplePosition = position;
+    _continuousVelocitySampleTime = timeStamp;
+
+    if (lastPosition == null || lastTime == null) return;
+
+    final dt = (timeStamp - lastTime).inMicroseconds;
+    if (dt <= 0) return;
+
+    final dtSeconds = dt / 1e6;
+    final v = (position - lastPosition) / dtSeconds;
+
+    _continuousFlingVelocity = Offset(
+      _continuousFlingVelocity.dx * 0.75 + v.dx * 0.25,
+      _continuousFlingVelocity.dy * 0.75 + v.dy * 0.25,
+    );
+  }
+
+  void _onContinuousPointerMove(PointerMoveEvent event) {
+    if (!_isContinuousMode()) {
+      return;
+    }
+    _continuousActivePointers[event.pointer] = event.localPosition;
+
+    if (_continuousActivePointers.length >= 2) {
+      _continuousFlingVelocity = Offset.zero;
+      final points = _continuousActivePointers.values.take(2).toList();
+      final currentDistance = (points[0] - points[1]).distance;
+      if (_continuousPinchStartDistance <= 0.0 || currentDistance <= 0.0) {
+        return;
+      }
+      final focalPoint = Offset(
+        (points[0].dx + points[1].dx) / 2,
+        (points[0].dy + points[1].dy) / 2,
+      );
+      final nextScale = _clampContinuousScale(
+        _continuousGestureStartScale *
+            (currentDistance / _continuousPinchStartDistance),
+      );
+      final nextPan = _clampContinuousPan(
+        _panForScaleChange(
+              fromScale: _continuousGestureStartScale,
+              toScale: nextScale,
+              currentPan: _continuousGestureStartPan,
+              localFocalPoint: _continuousPinchStartFocalPoint,
+            ) +
+            (focalPoint - _continuousPinchStartFocalPoint),
+        scale: nextScale,
+      );
+      setState(() {
+        _continuousScale = nextScale;
+        _continuousPanOffset = nextPan;
+      });
+      return;
+    }
+
+    if (_currentContinuousScale() > _continuousBaseScale + 0.01 &&
+        (!isDesktop || event.buttons != 0)) {
+      final delta = event.localPosition - _continuousLastSinglePointerPosition;
+      _continuousLastSinglePointerPosition = event.localPosition;
+      _updateContinuousDragVelocity(event.localPosition, event.timeStamp);
+      _applyContinuousDragDelta(delta);
+    }
+  }
+
+  void _onContinuousPointerUp(PointerEvent event) {
+    if (!_isContinuousMode()) {
+      return;
+    }
+
+    _continuousActivePointers.remove(event.pointer);
+
+    setState(() {
+      _continuousPointerCount = _continuousActivePointers.length;
+    });
+
+    if (_continuousActivePointers.length == 1) {
+      _continuousLastSinglePointerPosition =
+          _continuousActivePointers.values.first;
+
+      _continuousVelocitySamplePosition = _continuousLastSinglePointerPosition;
+      _continuousVelocitySampleTime = event.timeStamp;
+    } else if (_continuousActivePointers.isEmpty) {
+      final velocity = _continuousFlingVelocity;
+
+      _continuousVelocitySamplePosition = null;
+      _continuousVelocitySampleTime = null;
+
+      _startContinuousFling(velocity);
+    }
+
+    if (_currentContinuousScale() <= _continuousBaseScale + 0.01) {
+      _setContinuousPan(Offset.zero);
+    }
+  }
+
+  void _startContinuousFling(Offset velocity) {
+    if (velocity.distance < 50.0) return;
+
+    _continuousFlingVelocity = velocity;
+    _continuousFlingLastTimestamp = null;
+    _continuousFlingTicker?.start();
+  }
+
+  void _stopContinuousFling() {
+    _continuousFlingTicker?.stop();
+    _continuousFlingLastTimestamp = null;
+    _continuousFlingVelocity = Offset.zero;
+  }
+
+  void _onContinuousFlingTick(Duration elapsed) {
+    if (!mounted) {
+      _stopContinuousFling();
+      return;
+    }
+
+    final last = _continuousFlingLastTimestamp;
+    _continuousFlingLastTimestamp = elapsed;
+
+    if (last == null) return;
+
+    final dtMicros = (elapsed - last).inMicroseconds;
+    if (dtMicros <= 0) return;
+
+    final dt = dtMicros / 1e6;
+
+    final delta = _continuousFlingVelocity * dt;
+
+    if (delta.distance >= 0.001) {
+      _applyContinuousDragDelta(delta);
+    }
+
+    final decay = math.pow(0.92, dt * 60.0).toDouble();
+
+    _continuousFlingVelocity = Offset(
+      _continuousFlingVelocity.dx * decay,
+      _continuousFlingVelocity.dy * decay,
+    );
+
+    if (_continuousFlingVelocity.distance < 20.0) {
+      _stopContinuousFling();
+    }
+  }
+
+  void _onContinuousPointerCancel(PointerCancelEvent event) {
+    _onContinuousPointerUp(event);
+  }
+
+  double _continuousStepExtent(ReaderMode readerMode) {
+    final viewport = MediaQuery.sizeOf(context);
+    final isHorizontalContinuous =
+        readerMode == ReaderMode.horizontalContinuous ||
+        readerMode == ReaderMode.horizontalContinuousRTL;
+    final mainAxisExtent = isHorizontalContinuous
+        ? viewport.width
+        : viewport.height;
+    return mainAxisExtent * 0.9;
+  }
+
+  void _navigateContinuousStep({
+    required ReaderMode readerMode,
+    required bool forward,
+  }) {
+    final isHorizontalContinuous =
+        readerMode == ReaderMode.horizontalContinuous ||
+        readerMode == ReaderMode.horizontalContinuousRTL;
+    final directionMultiplier = readerMode == ReaderMode.horizontalContinuousRTL
+        ? -1.0
+        : 1.0;
+    final signedOffset =
+        _continuousStepExtent(readerMode) *
+        (forward ? 1.0 : -1.0) *
+        (isHorizontalContinuous ? directionMultiplier : 1.0);
+    _pageOffsetController.animateScroll(
+      offset: signedOffset,
+      duration: const Duration(milliseconds: 180),
+    );
+  }
+
+  void _goPreviousInReader(ReaderMode readerMode) {
+    if (_usesCanvasEngine(readerMode)) {
+      _navigateCanvasPage(forward: false);
+      return;
+    }
+    if (_isContinuousMode()) {
+      _navigateContinuousStep(readerMode: readerMode, forward: false);
+      return;
+    }
+    navigationService.previousPage(
+      readerMode: readerMode,
+      currentIndex: _currentIndex!,
+      animate: true,
+    );
+  }
+
+  void _goNextInReader(ReaderMode readerMode) {
+    if (_usesCanvasEngine(readerMode)) {
+      _navigateCanvasPage(forward: true);
+      return;
+    }
+    if (_isContinuousMode()) {
+      _navigateContinuousStep(readerMode: readerMode, forward: true);
+      return;
+    }
+    navigationService.nextPage(
+      readerMode: readerMode,
+      currentIndex: _currentIndex!,
+      maxPages: _pageViewPageCount,
+      animate: true,
+    );
+  }
+
+  void _onReaderObservedKeyEvent(KeyEvent event) {
+    final pressed =
+        HardwareKeyboard.instance.isControlPressed ||
+        HardwareKeyboard.instance.isMetaPressed;
+    if (pressed == _desktopZoomModifierPressed) {
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _desktopZoomModifierPressed = pressed;
+    });
+  }
+
+  double _readerAppBarHeight(bool fullScreenReader) {
+    if (!_isView) {
+      return 0;
+    }
+    if (Platform.isIOS) {
+      return 120.0;
+    }
+    return !fullScreenReader && !isDesktop ? 55.0 : 80.0;
+  }
+
+  bool _isPointerOverReaderChrome(
+    Offset globalPosition,
+    bool fullScreenReader,
+  ) {
+    if (!_isView) {
+      return false;
+    }
+    final renderObject = context.findRenderObject();
+    if (renderObject is! RenderBox) {
+      return false;
+    }
+    final local = renderObject.globalToLocal(globalPosition);
+    final screenHeight = renderObject.size.height;
+    final appBarHeight = _readerAppBarHeight(fullScreenReader);
+    const bottomBarHeight = 130.0;
+
+    return local.dy <= appBarHeight ||
+        local.dy >= screenHeight - bottomBarHeight;
+  }
+
+  void _handleContinuousCanvasPointerSignal(
+    PointerSignalEvent event,
+    bool fullScreenReader,
+  ) {
+    if (event is PointerScrollEvent &&
+        _isPointerOverReaderChrome(event.position, fullScreenReader)) {
+      return;
+    }
+    _handleContinuousPointerSignal(event);
+  }
 
   void _setFullScreen({bool? value}) async {
     if (isDesktop) {
@@ -344,28 +1305,83 @@ class _MangaChapterPageGalleryState
     ref.read(fullScreenReaderStateProvider.notifier).set(!value!);
   }
 
+  Widget _buildCanvasReader({
+    required ReaderMode readerMode,
+    required BackgroundColor backgroundColor,
+    required bool fullScreenReader,
+  }) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final viewportSize = Size(constraints.maxWidth, constraints.maxHeight);
+        final scene = _buildSceneForCurrentReaderMode(
+          readerPages: pages,
+          readerMode: readerMode,
+          viewportSize: viewportSize,
+        );
+        _scheduleCanvasSceneSync(scene: scene, viewportSize: viewportSize);
+
+        return Material(
+          color: getBackgroundColor(backgroundColor),
+          shadowColor: getBackgroundColor(backgroundColor),
+          child: CanvasReaderView(
+            scene: scene,
+            cameraController: _canvasCameraController,
+            backgroundColor: getBackgroundColor(backgroundColor),
+            preloadMargin: pagePreloadAmount * context.height(1),
+            snapPolicy: null,
+            onTap: _isViewFunction,
+            pageBuilder: (context, page, viewportRect) {
+              final data = page.data as UChapDataPreload;
+              if (data.isTransitionPage) {
+                return SizedBox.expand(
+                  child: TransitionViewVertical(data: data, fillParent: true),
+                );
+              }
+
+              return SizedBox.expand(
+                child: ImageViewVertical(
+                  data: data,
+                  failedToLoadImage: (value) {
+                    _scheduleCanvasStateSync(() {
+                      if (_failedToLoadImage.value != value && mounted) {
+                        _failedToLoadImage.value = value;
+                      }
+                    });
+                  },
+                  onLongPressData: (pageData) => ImageActionsDialog.show(
+                    context: context,
+                    data: pageData,
+                    manga: widget.chapter.manga.value!,
+                    chapterName: pageData.chapter?.name ?? widget.chapter.name!,
+                  ),
+                  isHorizontal: false,
+                  isScrolling: _isScrolling,
+                  fillParent: true,
+                  onMetricsChanged: () {
+                    _scheduleCanvasSceneRebuild();
+                  },
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final backgroundColor = ref.watch(backgroundColorStateProvider);
     final fullScreenReader = ref.watch(fullScreenReaderStateProvider);
     final readerMode = ref.watch(_currentReaderMode);
-    final bool isHorizontalContinuous =
-        readerMode == ReaderMode.horizontalContinuous ||
-        readerMode == ReaderMode.horizontalContinuousRTL;
+    final bool isHorizontalContinuous = false;
+    final useCanvasEngine = _usesCanvasEngine(readerMode);
 
     final l10n = l10nLocalizations(context)!;
     return ReaderKeyboardHandler(
-      onPreviousPage: () => navigationService.previousPage(
-        readerMode: readerMode!,
-        currentIndex: _currentIndex!,
-        animate: true,
-      ),
-      onNextPage: () => navigationService.nextPage(
-        readerMode: readerMode!,
-        currentIndex: _currentIndex!,
-        maxPages: _pageViewPageCount,
-        animate: true,
-      ),
+      onObservedKeyEvent: _onReaderObservedKeyEvent,
+      onPreviousPage: () => _goPreviousInReader(readerMode!),
+      onNextPage: () => _goNextInReader(readerMode!),
       onEscape: () => _goBack(context),
       onFullScreen: () => _setFullScreen(),
       onNextChapter: () {
@@ -413,20 +1429,24 @@ class _MangaChapterPageGalleryState
               builder: (context, failedToLoadImage, child) {
                 return Stack(
                   children: [
-                    _isContinuousMode()
+                    useCanvasEngine
+                        ? _buildCanvasReader(
+                            readerMode: readerMode!,
+                            backgroundColor: backgroundColor,
+                            fullScreenReader: fullScreenReader,
+                          )
+                        : _isContinuousMode()
                         ? ImageViewWebtoon(
                             pages: pages,
                             itemScrollController: _itemScrollController,
                             scrollOffsetController: _pageOffsetController,
                             itemPositionsListener: _itemPositionsListener,
-                            scrollDirection: isHorizontalContinuous
-                                ? Axis.horizontal
-                                : Axis.vertical,
+                            scrollDirection: Axis.vertical,
                             minCacheExtent:
                                 pagePreloadAmount * context.height(1),
                             initialScrollIndex: _readerController
                                 .getPageIndex(),
-                            physics: const ClampingScrollPhysics(),
+                            physics: _continuousScrollPhysics(),
                             onLongPressData: (data) => ImageActionsDialog.show(
                               context: context,
                               data: data,
@@ -434,11 +1454,9 @@ class _MangaChapterPageGalleryState
                               chapterName: widget.chapter.name!,
                             ),
                             onFailedToLoadImage: (value) {
-                              // TODO: Handle failed image loading
-                              // if (_failedToLoadImage.value != value &&
-                              //     context.mounted) {
-                              //   _failedToLoadImage.value = value;
-                              // }
+                              if (_failedToLoadImage.value != value && mounted) {
+                                _failedToLoadImage.value = value;
+                              }
                             },
                             backgroundColor: backgroundColor,
                             isDoublePageMode:
@@ -446,15 +1464,18 @@ class _MangaChapterPageGalleryState
                                 !isHorizontalContinuous,
                             isHorizontalContinuous: isHorizontalContinuous,
                             readerMode: ref.watch(_currentReaderMode)!,
-                            photoViewController: _photoViewController,
-                            photoViewScaleStateController:
-                                _photoViewScaleStateController,
-                            scalePosition: _scalePosition,
-                            onScaleEnd: (details) => _onScaleEnd(
-                              context,
-                              details,
-                              _photoViewController.value,
-                            ),
+                            containerKey: _continuousCanvasKey,
+                            scale: _continuousScale,
+                            panOffset: _continuousPanOffset,
+                            onPointerSignal: (PointerSignalEvent event) =>
+                                _handleContinuousCanvasPointerSignal(
+                                  event,
+                                  fullScreenReader,
+                                ),
+                            onPointerDown: _onContinuousPointerDown,
+                            onPointerMove: _onContinuousPointerMove,
+                            onPointerUp: _onContinuousPointerUp,
+                            onPointerCancel: _onContinuousPointerCancel,
                             onDoubleTapDown: (offset) => _toggleScale(offset),
                             onDoubleTap: () {},
                             webtoonSidePadding: ref.watch(
@@ -748,29 +1769,30 @@ class _MangaChapterPageGalleryState
                         final navigationLayout = ref.watch(
                           readerNavigationLayoutStateProvider,
                         );
-                        return ReaderGestureHandler(
-                          usePageTapZones: usePageTapZones,
-                          navigationLayout: navigationLayout,
-                          isRTL: _isReverseHorizontal,
-                          hasImageError: failedToLoadImage,
-                          isContinuousMode: _isContinuousMode(),
-                          onToggleUI: _isViewFunction,
-                          onPreviousPage: () => navigationService.previousPage(
-                            readerMode: readerMode!,
-                            currentIndex: _currentIndex!,
-                            animate: true,
+                        final transformedContinuous =
+                            _isContinuousMode() &&
+                            (_currentContinuousScale() - _continuousBaseScale)
+                                    .abs() >
+                                0.01;
+                        return IgnorePointer(
+                          ignoring: transformedContinuous || useCanvasEngine,
+                          child: ReaderGestureHandler(
+                            usePageTapZones: usePageTapZones,
+                            navigationLayout: navigationLayout,
+                            isRTL: _isReverseHorizontal,
+                            hasImageError: failedToLoadImage,
+                            isContinuousMode: _isContinuousMode(),
+                            onToggleUI: _isViewFunction,
+                            onPreviousPage: () =>
+                                _goPreviousInReader(readerMode!),
+                            onNextPage: () => _goNextInReader(readerMode!),
+                            onDoubleTapDown: (position) =>
+                                _toggleScale(position),
+                            onDoubleTap: () {},
+                            onSecondaryTapDown: (position) =>
+                                _toggleScale(position),
+                            onSecondaryTap: () {},
                           ),
-                          onNextPage: () => navigationService.nextPage(
-                            readerMode: readerMode!,
-                            currentIndex: _currentIndex!,
-                            maxPages: _pageViewPageCount,
-                            animate: true,
-                          ),
-                          onDoubleTapDown: (position) => _toggleScale(position),
-                          onDoubleTap: () {},
-                          onSecondaryTapDown: (position) =>
-                              _toggleScale(position),
-                          onSecondaryTap: () {},
                         );
                       },
                     ),
@@ -824,12 +1846,38 @@ class _MangaChapterPageGalleryState
                         );
                       },
                       onSliderChanged: (value, ref) {
+                        if (_usesCanvasEngine(ref.read(_currentReaderMode)) &&
+                            !_isCanvasSliderInteractionActive) {
+                          _beginCanvasSliderInteraction();
+                        }
                         ref
                             .read(currentIndexProvider(chapter).notifier)
                             .setCurrentIndex(value);
                       },
+                      onSliderChangeStart: (value) {
+                        _beginCanvasSliderInteraction();
+                      },
                       onSliderChangeEnd: (value) {
                         try {
+                          if (_usesCanvasEngine(ref.read(_currentReaderMode))) {
+                            final targetChapterId =
+                                _activeCanvasSliderChapterId ?? chapter.id;
+                            final jumpIndex = _findCanvasScenePageIndex(
+                              chapterId: targetChapterId!,
+                              chapterPageIndex: value,
+                            );
+                            if (jumpIndex == null) {
+                              _endCanvasSliderInteraction();
+                              return;
+                            }
+                            _jumpToCanvasPageIndex(
+                              jumpIndex,
+                              animate: false,
+                            );
+                            _endCanvasSliderInteraction();
+                            _onCanvasCameraChanged();
+                            return;
+                          }
                           final page = pages.firstWhere(
                             (element) =>
                                 element.chapter == chapter &&
@@ -845,15 +1893,15 @@ class _MangaChapterPageGalleryState
                             readerMode: ref.read(_currentReaderMode)!,
                           );
                         } catch (_) {}
+                        _endCanvasSliderInteraction();
                       },
                       onReaderModeChanged: (mode, ref) {
-                        ref.read(_currentReaderMode.notifier).state = mode;
-                        _setReaderMode(mode, ref);
+                        _applyReaderModeSelection(mode, ref);
                       },
                       onPageModeToggle: () async {
                         final readerMode = ref.read(_currentReaderMode);
-                        if (!(readerMode == ReaderMode.horizontalContinuous ||
-                            readerMode == ReaderMode.horizontalContinuousRTL)) {
+                        if (readerMode != null &&
+                            !isReaderModeContinuous(readerMode)) {
                           // Get the actual page index being viewed
                           final actualIdx = _pageViewToActualIndex(
                             _currentIndex!,
@@ -892,9 +1940,7 @@ class _MangaChapterPageGalleryState
                         pageOffset: _pageOffset,
                         onAutoPageScroll: _autoPagescroll,
                         onReaderModeChanged: (mode, widgetRef) {
-                          widgetRef.read(_currentReaderMode.notifier).state =
-                              mode;
-                          _setReaderMode(mode, widgetRef);
+                          _applyReaderModeSelection(mode, widgetRef);
                         },
                         onAutoScrollSave: (enabled, offset) {
                           _readerController.setAutoScroll(enabled, offset);
@@ -951,9 +1997,9 @@ class _MangaChapterPageGalleryState
     if (doubleTapAnimationValue == 0) {
       return const Duration(milliseconds: 10);
     } else if (doubleTapAnimationValue == 1) {
-      return const Duration(milliseconds: 800);
+      return const Duration(milliseconds: 180);
     }
-    return const Duration(milliseconds: 200);
+    return const Duration(milliseconds: 150);
   }
 
   void _readProgressListener() async {
@@ -969,8 +2015,8 @@ class _MangaChapterPageGalleryState
     final currentReaderMode = ref.read(_currentReaderMode);
     int pagesLength =
         (_pageMode == PageMode.doublePage &&
-            currentReaderMode != ReaderMode.horizontalContinuous &&
-            currentReaderMode != ReaderMode.horizontalContinuousRTL)
+            currentReaderMode != null &&
+            !isReaderModeContinuous(currentReaderMode))
         ? (pages.length / 2).ceil()
         : pages.length;
     if (_currentIndex! >= 0 && _currentIndex! < pagesLength) {
@@ -1042,7 +2088,11 @@ class _MangaChapterPageGalleryState
       // Use mixin's method for memory-bounded preloading with auto-eviction
       preloadNextChapter(chapterData, chap).then((success) {
         if (success && mounted) {
-          setState(() {});
+          if (_usesCanvasEngine(ref.read(_currentReaderMode))) {
+            _scheduleCanvasSceneRebuild();
+          } else {
+            setState(() {});
+          }
         }
       });
     } catch (_) {}
@@ -1113,6 +2163,20 @@ class _MangaChapterPageGalleryState
     try {
       if (chapterData.uChapDataPreload.isEmpty || !mounted) return;
 
+      if (_usesCanvasEngine(ref.read(_currentReaderMode))) {
+        final anchor = _captureCanvasAnchor();
+        preloadPreviousChapter(chapterData, chap).then((prependCount) {
+          if (prependCount > 0 && mounted) {
+            _pendingCanvasAnchor = anchor;
+            _currentIndex = (_currentIndex ?? 0) + prependCount;
+            _canvasVisiblePageIndex = null;
+            _canvasCameraInitialized = true;
+            _scheduleCanvasSceneRebuild(preserveAnchor: false);
+          }
+        });
+        return;
+      }
+
       // Record the CURRENT visible top index BEFORE prepending
       final currentVisibleItems = _itemPositionsListener.itemPositions.value;
       final oldTopIndex = currentVisibleItems.isNotEmpty
@@ -1154,14 +2218,18 @@ class _MangaChapterPageGalleryState
 
   void _initCurrentIndex() async {
     if (ref.read(cropBordersStateProvider)) _processCropBorders();
-    final readerMode = _readerController.getReaderMode();
+    final readerMode = normalizeReaderMode(_readerController.getReaderMode());
 
     // Initialize the preload manager with bounded memory (from ReaderMemoryManagement mixin)
     initializePreloadManager(
       _chapterUrlModel,
       onPagesUpdated: () {
         if (mounted) {
-          setState(() {});
+          if (_usesCanvasEngine(ref.read(_currentReaderMode))) {
+            _scheduleCanvasSceneRebuild();
+          } else {
+            setState(() {});
+          }
           if (ref.read(cropBordersStateProvider)) _processCropBorders();
         }
       },
@@ -1182,6 +2250,7 @@ class _MangaChapterPageGalleryState
       }
     }
     ref.read(_currentReaderMode.notifier).state = readerMode;
+    _syncReaderModeSettings(readerMode, ref);
     if (mounted) {
       setState(() {
         _pageMode = _readerController.getPageMode();
@@ -1189,15 +2258,12 @@ class _MangaChapterPageGalleryState
     }
     _setReaderMode(readerMode, ref);
 
-    if (readerMode != ReaderMode.verticalContinuous &&
-        readerMode != ReaderMode.webtoon) {
+    if (!isReaderModeContinuous(readerMode)) {
       _autoScroll.value = false;
     }
     _autoPagescroll();
     if (_readerController.getPageLength(_chapterUrlModel.pageUrls) == 1 &&
-        (readerMode == ReaderMode.ltr ||
-            readerMode == ReaderMode.rtl ||
-            readerMode == ReaderMode.vertical)) {
+        isReaderModePaged(readerMode)) {
       _onPageChanged(0);
     }
   }
@@ -1212,12 +2278,13 @@ class _MangaChapterPageGalleryState
     if (cropBorders) {
       _processCropBordersByIndex(index);
     }
-    if (_firstLaunch) {
+    if (_firstLaunch && !_usesCanvasEngine(ref.read(_currentReaderMode))) {
       Future.delayed(const Duration(milliseconds: 100)).then((_) {
         _firstLaunch = false;
       });
       return;
     }
+    _firstLaunch = false;
     final idx = pages[prevActualIndex].index;
     if (idx != null) {
       _readerController.setPageIndex(
@@ -1274,45 +2341,48 @@ class _MangaChapterPageGalleryState
         if (!_autoScroll.value) {
           return;
         }
-        _pageOffsetController.animateScroll(
-          offset: _pageOffset.value,
-          duration: const Duration(milliseconds: 100),
-        );
+        if (_usesCanvasEngine(ref.read(_currentReaderMode))) {
+          _canvasCameraController.panBy(Offset(0, -_pageOffset.value));
+        } else {
+          _pageOffsetController.animateScroll(
+            offset: _pageOffset.value,
+            duration: const Duration(milliseconds: 100),
+          );
+        }
       }
       _autoPagescroll();
     }
   }
 
-  void _toggleScale(Offset tapPosition) {
-    if (mounted) {
-      setState(() {
-        if (_scaleAnimationController.isAnimating) {
-          return;
-        }
-
-        if (_photoViewController.scale == 1.0) {
-          _scalePosition = _computeAlignmentByTapOffset(tapPosition);
-
-          if (_scaleAnimationController.isCompleted) {
-            _scaleAnimationController.reset();
-          }
-
-          _scaleAnimationController.forward();
-          return;
-        }
-
-        if (_photoViewController.scale == 2.0) {
-          _scaleAnimationController.reverse();
-          return;
-        }
-
-        _photoViewScaleStateController.reset();
-      });
+  void _toggleScale(Offset globalPosition) {
+    if (!mounted || _scaleAnimationController.isAnimating) {
+      return;
     }
+
+    final currentScale = _currentContinuousScale();
+    final shouldZoomIn = (currentScale - _continuousBaseScale).abs() < 0.05;
+    _animateContinuousScale(
+      shouldZoomIn ? _continuousDoubleTapScale : _continuousBaseScale,
+      localFocalPoint: _readerLocalPointFromGlobal(globalPosition),
+    );
+  }
+
+  void _syncReaderModeSettings(ReaderMode mode, WidgetRef ref) {
+    ref
+        .read(showPageGapsStateProvider.notifier)
+        .set(isReaderModeLongStripWithGaps(mode));
+  }
+
+  void _applyReaderModeSelection(ReaderMode mode, WidgetRef ref) {
+    final normalizedMode = normalizeReaderMode(mode);
+    _syncReaderModeSettings(normalizedMode, ref);
+    ref.read(_currentReaderMode.notifier).state = normalizedMode;
+    _setReaderMode(normalizedMode, ref);
   }
 
   void _setReaderMode(ReaderMode value, WidgetRef ref) async {
-    if (value != ReaderMode.verticalContinuous && value != ReaderMode.webtoon) {
+    final normalizedMode = normalizeReaderMode(value);
+    if (!isReaderModeContinuous(normalizedMode)) {
       _autoScroll.value = false;
     } else {
       if (_autoScrollPage.value) {
@@ -1322,11 +2392,24 @@ class _MangaChapterPageGalleryState
     }
 
     _failedToLoadImage.value = false;
-    _readerController.setReaderMode(value);
+    _continuousScale = _continuousBaseScale;
+    _continuousPanOffset = Offset.zero;
+    _continuousPointerCount = 0;
+    _desktopZoomModifierPressed = false;
+    _continuousActivePointers.clear();
+    _canvasCameraController.stopMotion();
+    _canvasScene = ReaderScene.empty;
+    _canvasViewportSize = Size.zero;
+    _canvasVisiblePageIndex = null;
+    _canvasCameraInitialized = false;
+    _pendingCanvasAnchor = null;
+    _isCanvasSliderInteractionActive = false;
+    _activeCanvasSliderChapterId = null;
+    _readerController.setReaderMode(normalizedMode);
 
     int index = _pageViewToActualIndex(_currentIndex!);
-    ref.read(_currentReaderMode.notifier).state = value;
-    if (value == ReaderMode.vertical) {
+    ref.read(_currentReaderMode.notifier).state = normalizedMode;
+    if (normalizedMode == ReaderMode.vertical) {
       if (mounted) {
         setState(() {
           _scrollDirection = Axis.vertical;
@@ -1337,10 +2420,10 @@ class _MangaChapterPageGalleryState
 
         _extendedController.jumpToPage(index);
       }
-    } else if (value == ReaderMode.ltr || value == ReaderMode.rtl) {
+    } else if (isReaderModeHorizontalPaged(normalizedMode)) {
       if (mounted) {
         setState(() {
-          if (value == ReaderMode.rtl) {
+          if (normalizedMode == ReaderMode.rtl) {
             _isReverseHorizontal = true;
           } else {
             _isReverseHorizontal = false;
@@ -1356,7 +2439,7 @@ class _MangaChapterPageGalleryState
     } else {
       if (mounted) {
         setState(() {
-          _isReverseHorizontal = value == ReaderMode.horizontalContinuousRTL;
+          _isReverseHorizontal = false;
         });
         // Wait for the next frame so the scroll view rebuilds
         await WidgetsBinding.instance.endOfFrame;
@@ -1450,11 +2533,10 @@ class _MangaChapterPageGalleryState
   }
 
   /// Whether double page mode is active (continuous or paged).
-  /// Horizontal continuous mode does NOT use double page layout.
+  /// Long strip modes do NOT use double page layout.
   bool get _isDoublePageActive =>
       _pageMode == PageMode.doublePage &&
-      ref.read(_currentReaderMode) != ReaderMode.horizontalContinuous &&
-      ref.read(_currentReaderMode) != ReaderMode.horizontalContinuousRTL;
+      !isReaderModeContinuous(ref.read(_currentReaderMode)!);
 
   /// Converts a page view index (from ExtendedPageController) to the actual
   /// index in the [pages] array for double page mode.
@@ -1481,9 +2563,6 @@ class _MangaChapterPageGalleryState
 
   bool _isContinuousMode() {
     final readerMode = ref.read(_currentReaderMode);
-    return readerMode == ReaderMode.verticalContinuous ||
-        readerMode == ReaderMode.webtoon ||
-        readerMode == ReaderMode.horizontalContinuous ||
-        readerMode == ReaderMode.horizontalContinuousRTL;
+    return readerMode != null && isReaderModeContinuous(readerMode);
   }
 }

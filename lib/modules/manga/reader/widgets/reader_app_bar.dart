@@ -83,7 +83,7 @@ class ReaderAppBar extends ConsumerWidget {
         width: context.width(1),
         height: height,
         curve: Curves.ease,
-        duration: const Duration(milliseconds: 300),
+        duration: const Duration(milliseconds: 120),
         child: PreferredSize(
           preferredSize: Size.fromHeight(height),
           child: AppBar(

@@ -131,6 +131,7 @@ class ReaderKeyboardHandler {
   final VoidCallback? onNextPage;
   final VoidCallback? onNextChapter;
   final VoidCallback? onPreviousChapter;
+  final void Function(KeyEvent event)? onObservedKeyEvent;
 
   const ReaderKeyboardHandler({
     this.onEscape,
@@ -139,6 +140,7 @@ class ReaderKeyboardHandler {
     this.onNextPage,
     this.onNextChapter,
     this.onPreviousChapter,
+    this.onObservedKeyEvent,
   });
 
   /// Handles a key event and returns true if it was handled.
@@ -204,8 +206,10 @@ class ReaderKeyboardHandler {
     return KeyboardListener(
       autofocus: true,
       focusNode: focusNode ?? FocusNode(),
-      onKeyEvent: (event) =>
-          handleKeyEvent(event, isReverseHorizontal: isReverseHorizontal),
+      onKeyEvent: (event) {
+        onObservedKeyEvent?.call(event);
+        handleKeyEvent(event, isReverseHorizontal: isReverseHorizontal);
+      },
       child: child,
     );
   }

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart' show ProviderListenable;
 import 'package:mangayomi/models/settings.dart';
+import 'package:mangayomi/modules/manga/reader/modes/reader_modes.dart';
 import 'package:mangayomi/modules/manga/reader/providers/color_filter_provider.dart';
 import 'package:mangayomi/modules/manga/reader/widgets/color_filter_widget.dart';
 import 'package:mangayomi/modules/manga/reader/widgets/custom_popup_menu_button.dart';
@@ -128,14 +129,9 @@ class _ReadingModeTab extends ConsumerWidget {
     final usePageTapZones = ref.watch(usePageTapZonesStateProvider);
     final cropBorders = ref.watch(cropBordersStateProvider);
     final keepScreenOn = ref.watch(keepScreenOnReaderStateProvider);
-    final showPageGaps = ref.watch(showPageGapsStateProvider);
     final webtoonSidePadding = ref.watch(webtoonSidePaddingStateProvider);
 
-    final isContinuousMode =
-        readerMode == ReaderMode.verticalContinuous ||
-        readerMode == ReaderMode.webtoon ||
-        readerMode == ReaderMode.horizontalContinuous ||
-        readerMode == ReaderMode.horizontalContinuousRTL;
+    final isContinuousMode = isReaderModeContinuous(readerMode!);
 
     return SingleChildScrollView(
       child: Padding(
@@ -150,7 +146,7 @@ class _ReadingModeTab extends ConsumerWidget {
                 onReaderModeChanged(value, ref);
               },
               value: readerMode,
-              list: ReaderMode.values,
+              list: supportedReaderModes,
               itemText: (mode) => getReaderModeName(mode, context),
             ),
 
@@ -204,24 +200,6 @@ class _ReadingModeTab extends ConsumerWidget {
                 ref.read(keepScreenOnReaderStateProvider.notifier).set(value);
               },
             ),
-
-            // Show Page Gaps (only for continuous modes)
-            if (isContinuousMode)
-              SwitchListTile(
-                value: showPageGaps,
-                title: Text(
-                  l10n.show_page_gaps,
-                  style: TextStyle(
-                    color: Theme.of(
-                      context,
-                    ).textTheme.bodyLarge!.color!.withValues(alpha: 0.9),
-                    fontSize: 14,
-                  ),
-                ),
-                onChanged: (value) {
-                  ref.read(showPageGapsStateProvider.notifier).set(value);
-                },
-              ),
 
             // Webtoon Side Padding (only for continuous modes)
             if (isContinuousMode)

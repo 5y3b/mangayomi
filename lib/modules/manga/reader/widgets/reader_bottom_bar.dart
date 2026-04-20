@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart' show ProviderListenable;
 import 'package:mangayomi/models/chapter.dart';
 import 'package:mangayomi/models/settings.dart';
+import 'package:mangayomi/modules/manga/reader/modes/reader_modes.dart';
 import 'package:mangayomi/modules/manga/reader/providers/reader_controller_provider.dart';
 import 'package:mangayomi/modules/manga/reader/widgets/custom_value_indicator_shape.dart';
 import 'package:mangayomi/modules/more/settings/reader/providers/reader_state_provider.dart';
@@ -44,6 +45,9 @@ class ReaderBottomBar extends ConsumerWidget {
 
   /// Callback when slider value changes (for updating provider)
   final void Function(int value, WidgetRef ref) onSliderChanged;
+
+  /// Callback when slider drag starts
+  final void Function(int value)? onSliderChangeStart;
 
   /// Callback when slider drag ends (for navigation)
   final void Function(int value) onSliderChangeEnd;
@@ -90,6 +94,7 @@ class ReaderBottomBar extends ConsumerWidget {
     this.onPreviousChapter,
     this.onNextChapter,
     required this.onSliderChanged,
+    this.onSliderChangeStart,
     required this.onSliderChangeEnd,
     required this.onReaderModeChanged,
     this.onPageModeToggle,
@@ -108,15 +113,13 @@ class ReaderBottomBar extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final readerMode = ref.watch(currentReaderModeProvider);
-    final isHorizontalContinuous =
-        readerMode == ReaderMode.horizontalContinuous ||
-        readerMode == ReaderMode.horizontalContinuousRTL;
+    final isHorizontalContinuous = false;
 
     return Positioned(
       bottom: 0,
       child: AnimatedContainer(
         curve: Curves.ease,
-        duration: const Duration(milliseconds: 300),
+        duration: const Duration(milliseconds: 120),
         width: context.width(1),
         height: isVisible ? 130 : 0,
         child: Column(
@@ -293,6 +296,9 @@ class ReaderBottomBar extends ConsumerWidget {
             overlayShape: const RoundSliderOverlayShape(overlayRadius: 5.0),
           ),
           child: Slider(
+            onChangeStart: (value) {
+              onSliderChangeStart?.call(value.toInt());
+            },
             onChanged: (value) {
               onSliderChanged(value.toInt(), ref);
             },
@@ -330,7 +336,7 @@ class ReaderBottomBar extends ConsumerWidget {
               onReaderModeChanged(value, ref);
             },
             itemBuilder: (context) => [
-              for (var mode in ReaderMode.values)
+              for (var mode in supportedReaderModes)
                 PopupMenuItem(
                   value: mode,
                   child: Row(

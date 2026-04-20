@@ -11,6 +11,7 @@ import 'package:mangayomi/models/settings.dart';
 import 'package:mangayomi/models/track.dart';
 import 'package:mangayomi/models/track_preference.dart';
 import 'package:mangayomi/modules/manga/detail/providers/track_state_providers.dart';
+import 'package:mangayomi/modules/manga/reader/modes/reader_modes.dart';
 import 'package:mangayomi/modules/more/providers/incognito_mode_state_provider.dart';
 import 'package:mangayomi/modules/more/settings/downloads/providers/downloads_state_provider.dart';
 import 'package:mangayomi/modules/more/settings/track/providers/track_providers.dart';
@@ -77,9 +78,9 @@ class ReaderController extends _$ReaderController {
       (element) => element.mangaId == getManga().id,
     );
     if (personalReaderMode.isNotEmpty) {
-      return personalReaderMode.first.readerMode;
+      return normalizeReaderMode(personalReaderMode.first.readerMode);
     }
-    return isar.settings.getSync(227)!.defaultReaderMode;
+    return normalizeReaderMode(isar.settings.getSync(227)!.defaultReaderMode);
   }
 
   (bool, double) autoScrollValues() {
@@ -131,6 +132,7 @@ class ReaderController extends _$ReaderController {
   }
 
   void setReaderMode(ReaderMode newReaderMode) {
+    final normalizedMode = normalizeReaderMode(newReaderMode);
     List<PersonalReaderMode>? personalReaderModeLists = [];
     for (var personalReaderMode
         in getIsarSetting().personalReaderModeList ?? []) {
@@ -141,7 +143,7 @@ class ReaderController extends _$ReaderController {
     personalReaderModeLists.add(
       PersonalReaderMode()
         ..mangaId = getManga().id
-        ..readerMode = newReaderMode,
+        ..readerMode = normalizedMode,
     );
     isar.writeTxnSync(
       () => isar.settings.putSync(
@@ -362,8 +364,7 @@ class ReaderController extends _$ReaderController {
     if (!save && newIndex == _lastSavedIndex) return;
     _lastSavedIndex = newIndex;
     final isContinuousLike =
-        getReaderMode() == ReaderMode.verticalContinuous ||
-        getReaderMode() == ReaderMode.webtoon;
+        isReaderModeContinuous(getReaderMode());
     final isRead = isContinuousLike
         ? (newIndex + 2) >= getPageLength([]) - 1
         : (newIndex + 2) >= getPageLength([]);

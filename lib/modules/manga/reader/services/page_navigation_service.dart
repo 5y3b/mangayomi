@@ -1,6 +1,7 @@
 import 'package:extended_image/extended_image.dart';
 import 'package:flutter/material.dart';
 import 'package:mangayomi/models/settings.dart';
+import 'package:mangayomi/modules/manga/reader/modes/reader_modes.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 /// Service for handling page navigation in the manga reader.
@@ -106,10 +107,7 @@ class PageNavigationService {
   }
 
   bool _isContinuousMode(ReaderMode mode) {
-    return mode == ReaderMode.verticalContinuous ||
-        mode == ReaderMode.webtoon ||
-        mode == ReaderMode.horizontalContinuous ||
-        mode == ReaderMode.horizontalContinuousRTL;
+    return isReaderModeContinuous(mode);
   }
 }
 

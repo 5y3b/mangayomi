@@ -15,6 +15,8 @@ class ImageViewVertical extends ConsumerWidget {
   final Function(UChapDataPreload data) onLongPressData;
   final bool isHorizontal;
   final ValueNotifier<bool> isScrolling;
+  final VoidCallback? onMetricsChanged;
+  final bool fillParent;
 
   final Function(bool) failedToLoadImage;
 
@@ -25,11 +27,42 @@ class ImageViewVertical extends ConsumerWidget {
     required this.failedToLoadImage,
     required this.isHorizontal,
     required this.isScrolling,
+    this.onMetricsChanged,
+    this.fillParent = false,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final (colorBlendMode, color) = chapterColorFIlterValues(context, ref);
+    void notifyFailedToLoadImage(bool value) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        failedToLoadImage(value);
+      });
+    }
+
+    void notifyMetricsChanged() {
+      if (onMetricsChanged == null) {
+        return;
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        onMetricsChanged?.call();
+      });
+    }
+
+    Widget buildCanvasBoundedChild(Widget child) {
+      if (!fillParent) {
+        return child;
+      }
+      return SizedBox.expand(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: child,
+          ),
+        ),
+      );
+    }
+
     final imageWidget = ValueListenableBuilder<bool>(
       valueListenable: isScrolling,
       builder: (context, scrolling, _) => ExtendedImage(
@@ -42,7 +75,7 @@ class ImageViewVertical extends ConsumerWidget {
         enableLoadState: true,
         loadStateChanged: (state) {
           if (state.extendedImageLoadState == LoadState.completed) {
-            failedToLoadImage(false);
+            notifyFailedToLoadImage(false);
             final rawSize = state.extendedImageInfo?.image;
             if (rawSize != null && data.loadedHeight == null) {
               final screenWidth = isHorizontal
@@ -51,10 +84,15 @@ class ImageViewVertical extends ConsumerWidget {
               final aspect = rawSize.width / rawSize.height;
               data.loadedWidth = screenWidth;
               data.loadedHeight = screenWidth / aspect;
+              notifyMetricsChanged();
             }
           }
-          final placeholderHeight = data.loadedHeight ?? context.height(0.8);
-          final placeholderWidth = isHorizontal
+          final placeholderHeight = fillParent
+              ? double.infinity
+              : (data.loadedHeight ?? context.height(0.8));
+          final placeholderWidth = fillParent
+              ? double.infinity
+              : isHorizontal
               ? (data.loadedWidth ?? context.width(0.8))
               : null;
           if (state.extendedImageLoadState == LoadState.loading) {
@@ -67,51 +105,56 @@ class ImageViewVertical extends ConsumerWidget {
               color: Colors.black,
               height: placeholderHeight,
               width: placeholderWidth,
-              child: CircularProgressIndicatorAnimateRotate(progress: progress),
+              child: buildCanvasBoundedChild(
+                CircularProgressIndicatorAnimateRotate(progress: progress),
+              ),
             );
           }
           if (state.extendedImageLoadState == LoadState.failed) {
-            failedToLoadImage(true);
+            notifyFailedToLoadImage(true);
             return Container(
               color: Colors.black,
               height: placeholderHeight,
               width: placeholderWidth,
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    context.l10n.image_loading_error,
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.7),
+              child: buildCanvasBoundedChild(
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      context.l10n.image_loading_error,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.7),
+                      ),
                     ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.all(8.0),
-                    child: GestureDetector(
-                      onLongPress: () {
-                        state.reLoadImage();
-                        failedToLoadImage(false);
-                      },
-                      onTap: () {
-                        state.reLoadImage();
-                        failedToLoadImage(false);
-                      },
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: context.primaryColor,
-                          borderRadius: BorderRadius.circular(30),
-                        ),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            vertical: 8,
-                            horizontal: 16,
+                    Padding(
+                      padding: const EdgeInsets.all(8.0),
+                      child: GestureDetector(
+                        onLongPress: () {
+                          state.reLoadImage();
+                          notifyFailedToLoadImage(false);
+                        },
+                        onTap: () {
+                          state.reLoadImage();
+                          notifyFailedToLoadImage(false);
+                        },
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: context.primaryColor,
+                            borderRadius: BorderRadius.circular(30),
                           ),
-                          child: Text(context.l10n.retry),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              vertical: 8,
+                              horizontal: 16,
+                            ),
+                            child: Text(context.l10n.retry),
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             );
           }
@@ -122,7 +165,9 @@ class ImageViewVertical extends ConsumerWidget {
     return applyReaderColorFilter(
       GestureDetector(
         onLongPress: () => onLongPressData.call(data),
-        child: isHorizontal
+        child: fillParent
+            ? SizedBox.expand(child: imageWidget)
+            : isHorizontal
             ? imageWidget
             : Column(
                 mainAxisAlignment: MainAxisAlignment.center,
