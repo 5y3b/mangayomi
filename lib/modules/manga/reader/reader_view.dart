@@ -355,17 +355,8 @@ class _MangaChapterPageGalleryState
 
     final l10n = l10nLocalizations(context)!;
     return ReaderKeyboardHandler(
-      onPreviousPage: () => navigationService.previousPage(
-        readerMode: readerMode!,
-        currentIndex: _currentIndex!,
-        animate: true,
-      ),
-      onNextPage: () => navigationService.nextPage(
-        readerMode: readerMode!,
-        currentIndex: _currentIndex!,
-        maxPages: _pageViewPageCount,
-        animate: true,
-      ),
+      onPreviousPage: () => _handleTapPageNavigation(forward: false),
+      onNextPage: () => _handleTapPageNavigation(forward: true),
       onEscape: () => _goBack(context),
       onFullScreen: () => _setFullScreen(),
       onNextChapter: () {
@@ -755,17 +746,10 @@ class _MangaChapterPageGalleryState
                           hasImageError: failedToLoadImage,
                           isContinuousMode: _isContinuousMode(),
                           onToggleUI: _isViewFunction,
-                          onPreviousPage: () => navigationService.previousPage(
-                            readerMode: readerMode!,
-                            currentIndex: _currentIndex!,
-                            animate: true,
-                          ),
-                          onNextPage: () => navigationService.nextPage(
-                            readerMode: readerMode!,
-                            currentIndex: _currentIndex!,
-                            maxPages: _pageViewPageCount,
-                            animate: true,
-                          ),
+                          onPreviousPage: () =>
+                              _handleTapPageNavigation(forward: false),
+                          onNextPage: () =>
+                              _handleTapPageNavigation(forward: true),
                           onDoubleTapDown: (position) => _toggleScale(position),
                           onDoubleTap: () {},
                           onSecondaryTapDown: (position) =>
@@ -1308,6 +1292,37 @@ class _MangaChapterPageGalleryState
 
         _photoViewScaleStateController.reset();
       });
+    }
+  }
+
+  void _handleTapPageNavigation({required bool forward}) {
+    final readerMode = ref.read(_currentReaderMode);
+    if (readerMode == null || _currentIndex == null) return;
+
+    if (readerMode == ReaderMode.webtoon) {
+      final viewportHeight = MediaQuery.sizeOf(context).height;
+      final offset = viewportHeight * 0.60 * (forward ? 1 : -1);
+      _pageOffsetController.animateScroll(
+        offset: offset,
+        duration: const Duration(milliseconds: 160),
+        curve: Curves.easeInOut,
+      );
+      return;
+    }
+
+    if (forward) {
+      navigationService.nextPage(
+        readerMode: readerMode,
+        currentIndex: _currentIndex!,
+        maxPages: _pageViewPageCount,
+        animate: true,
+      );
+    } else {
+      navigationService.previousPage(
+        readerMode: readerMode,
+        currentIndex: _currentIndex!,
+        animate: true,
+      );
     }
   }
 
